@@ -1,94 +1,194 @@
-# dint
+<p align="center">
+  <h1 align="center">dint</h1>
+  <p align="center">
+    <strong>The AI tutor that refuses to give you the answer.</strong>
+  </p>
+</p>
 
-**dint** is a Socratic AI tutor that teaches through guided discovery. Instead of giving you answers, dint asks the right questions to help you build understanding from the ground up.
+<p align="center">
+  <a href="https://pypi.org/project/dint/"><img src="https://img.shields.io/pypi/v/dint?color=white&labelColor=black&style=flat-square" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/dint/"><img src="https://img.shields.io/pypi/pyversions/dint?color=white&labelColor=black&style=flat-square" alt="Python versions"></a>
+  <a href="https://github.com/safe049/dint/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/dint?color=white&labelColor=black&style=flat-square" alt="License: MIT"></a>
+</p>
 
-## Features
+<p align="center">
+  <img src="assets/image.png" width="720" alt="dint — a Socratic AI tutor">
+</p>
 
-- **Socratic dialogue** — dint never just tells you the answer; it leads you there with questions
-- **Adaptive skill tracking** — estimates your proficiency per concept and adjusts difficulty
-- **Knowledge graph** — builds a map of concepts and their relationships as you learn
-- **Long-term memory** — remembers your preferences, misconceptions, and learning goals across sessions
-- **Web search** — looks up current information when needed
-- **Session management** — multiple conversation threads, each with its own progress
+---
 
-## Quick Start
+You ask ChatGPT how bubble sort works. It dumps code. You copy it. You feel
+smart. You learn nothing. By Thursday, you can't explain it to a rubber duck.
 
-### Option A — pip install (recommended)
+**dint is the opposite.** You ask it how bubble sort works, and it hands you
+five numbers and says *"sort them. you can only swap neighbors. go."* You
+fumble. You trace. You figure it out. And when the code finally appears, you
+read it and think *yeah, that's the thing I just built.*
+
+dint doesn't transmit knowledge. It builds it in your head, brick by brick,
+while you do the lifting.
+
+## What a session actually looks like
+> **You:** Teach me what a variable is. I've never written code.
+>
+> **dint:** Okay. Sit down. No code today. Not yet.
+>
+> You're trying to cut back on coffee, so you grab a sticky note, write
+> "cups" at the top, and every time you finish one, you update the number.
+> Morning: 0. After your second cup: 2. By 4pm you're at 4 and your hands
+> are shaking a little.
+>
+> That sticky note. The word "cups" never changed. The number kept changing.
+> There are two things on that note, and they're different things. One stays
+> put. One moves. Can you name those two for me?
+>
+> **You:** the cups is the variable name and that number is a value
+>
+> **dint:** Yeah. That's it. You just described a variable without ever
+> seeing a line of code, and you used the right words for both parts.
+> So that's not luck — you actually see it.
+>
+> *(...the lesson continues through sticky notes on a fridge, three
+> variables, mutation, `x = x + 5`, and ends with types — all before
+> the learner sees more than four lines of code...)*
+>
+> **dint:** Go rest. You earned the cold coffee. Come back when you're ready.
+
+
+No "Great question!" No code dump. No "Is there anything else I can help you
+with?" Just a teacher, a sticky note, and the quiet satisfaction of watching
+someone's face change when an idea lands.
+
+## Quick start
 
 ```bash
-# 1. Install from the project root
-pip install .
+pip install dint
+```
 
-# 2. Configure your API key
-cp .env.example .env
-# Edit .env — add your OpenAI / Anthropic / other provider key
-
-# 3. Run
+```bash
 dint
 ```
 
-### Option B — run.sh (dev mode with auto-reload)
+Open **http://localhost:7070**. Set your API key in **Settings**. Start
+learning.
 
-```bash
-chmod +x run.sh
-./run.sh
-```
+Works with any OpenAI-compatible API — OpenAI, OpenRouter, Groq, Together,
+or a local [Ollama](https://ollama.com) server.
 
-### Option C — uv
+## What dint actually does
 
-```bash
-uv sync
-uv run dint
-```
+<table>
+<tr>
+<td width="33%">
 
-The app will be available at **http://localhost:7070**.
+**Socratic dialogue**
 
-### CLI options
+Decomposes every topic into small, concrete concepts. Grounds each one in
+something you can hold in your head — five numbers, three cards, one sticky
+note. Asks you to predict, trace, and decide before revealing anything. The
+code shows up last, as confirmation. Not as the lesson.
 
-```
-dint [--host HOST] [--port PORT] [--no-reload]
-```
+</td>
+<td width="33%">
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--host` | Bind address | `0.0.0.0` |
-| `--port` | Port to listen on | `7070` |
-| `--no-reload` | Disable auto-reload (production) | *(reload on)* |
+**Spaced repetition (SM-2)**
+
+Schedules review questions for skills you've demonstrated. Come back three
+days later and it opens with *"quick — what's the base case in recursion?"*
+Get it right, the next review moves further out. Get it wrong, it circles
+back tomorrow. Knowledge that isn't revisited decays. dint doesn't let it.
+
+</td>
+<td width="33%">
+
+**Knowledge graph**
+
+Every concept gets added to a graph — nodes and edges, how ideas connect.
+"Binary search" links to "sorted array" links to "comparison." The graph
+grows as you learn, and dint uses it to connect new ideas to ones you've
+already built.
+
+</td>
+</tr>
+<tr>
+<td>
+
+**Long-term memory**
+
+Remembers you across sessions. Your goals, what you already know, how you
+like to be taught, the mistakes you keep making. Reads its notes before each
+session so it never re-teaches what you've already demonstrated.
+
+</td>
+<td>
+
+**Background reflection**
+
+After every exchange, a quiet analysis pass updates dint's model of you —
+skill confidence, knowledge links, durable memories. You don't see it. Like
+a professor updating their gradebook after you leave office hours.
+
+</td>
+<td>
+
+**Web search**
+
+For facts dint genuinely doesn't know or that change over time. Library
+versions, API details, current events. Never as an excuse to fetch an answer
+and hand it to you.
+
+</td>
+</tr>
+</table>
 
 ## Architecture
 
 ```
-dint/
-├── src/dint/
-│   ├── app.py          # FastAPI application + REST routes
-│   ├── agent.py        # Tool-calling orchestration loop
-│   ├── llm.py          # LLM provider (OpenAI-compatible)
-│   ├── tools.py        # Tool definitions & executors
-│   ├── reflection.py   # Post-turn analysis (skills, memory, KG)
-│   ├── persona.py      # System prompt / teaching persona
-│   ├── db.py           # SQLite persistence layer
-│   ├── config.py       # Environment configuration
-│   ├── cli.py          # CLI entry point (argparse + uvicorn)
-│   └── frontend/       # Bundled static assets
-│       ├── index.html  # SPA shell
-│       ├── style.css   # Dark-theme UI
-│       └── app.js      # Client logic
-├── frontend/           # Source frontend (dev copy)
-├── run.sh              # One-command launcher (dev)
-├── pyproject.toml      # Package metadata & dependencies
-└── .env.example        # Config template
+src/dint/
+├── app.py              # FastAPI application + REST + SSE streaming
+├── agent.py            # Tool-calling orchestration loop (blocking + streaming)
+├── llm.py              # OpenAI-compatible client (any provider)
+├── tools.py            # 9 tools: memory, skills, knowledge, search, review
+├── reflection.py       # Post-turn analysis → skills, memory, knowledge graph
+├── persona.py          # The professor. The whole professor.
+├── db.py               # SQLite: knowledge graph, memory, skills, SM-2, sessions
+├── config.py           # Environment / .env configuration
+├── settings_store.py   # Runtime-editable settings (.env + settings.json)
+├── cli.py              # CLI entry point (argparse + uvicorn)
+└── frontend/
+    ├── index.html      # SPA shell
+    ├── style.css       # Monochrome UI
+    └── app.js          # Client logic (SSE streaming, panels, settings)
 ```
 
-## How It Works
+**The loop:**
 
-1. You send a message via the web UI.
-2. The agent assembles context: persona, relevant memories, skill estimates, and knowledge subgraph.
-3. The LLM responds, optionally calling tools (web search, memory recall, skill lookup, KG query).
-4. After the reply, the **reflection engine** analyses the exchange:
-   - Updates skill confidence scores
-   - Extracts new knowledge-graph nodes/edges
-   - Stores durable memories (preferences, corrections, goals)
-5. The UI renders the reply and updates the side panels.
+```
+You send a message
+        │
+        ▼
+┌─────────────────────────────────────────────┐
+│  Agent assembles context:                   │
+│  persona + memories + skills + knowledge    │
+│  + skills due for review (SM-2)             │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  LLM responds, calling tools as needed:     │
+│  memory · skills · knowledge · search ·     │
+│  concept tracking · review scheduling       │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  Reply streams back token by token (SSE)    │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  Background reflection (async, non-blocking)│
+│  → skill confidence · knowledge edges ·     │
+│    durable memories · SM-2 scheduling       │
+└─────────────────────────────────────────────┘
+```
 
 ## Configuration
 
@@ -96,16 +196,29 @@ dint/
 |----------|-------------|---------|
 | `OPENAI_API_KEY` | API key for your provider | *(required)* |
 | `OPENAI_BASE_URL` | OpenAI-compatible endpoint | `https://api.openai.com/v1` |
-| `DINT_MODEL` | Model name | `gpt-4o-mini` |
+| `DINT_MODEL` | Model for teaching (must support tool calling) | `gpt-4o-mini` |
+| `REFLECT_MODEL` | Model for background reflection | *(same as DINT_MODEL)* |
 | `DATABASE_URL` | SQLite database path | `dint.db` |
-| `SERPER_API_KEY` | Serper.dev key for web search | *(optional)* |
+| `MAX_TOOL_ROUNDS` | Max tool-call rounds per turn | `8` |
+| `WEB_SEARCH_RESULTS` | Results per web search | `5` |
+
+All settings are also editable at runtime through the **Settings** panel in
+the web UI. Changes take effect immediately.
 
 ## Requirements
 
-- Python 3.11+
-- An OpenAI-compatible API key (OpenAI, Anthropic via proxy, Ollama, etc.)
-- *(Optional)* A [Serper.dev](https://serper.dev) key for web search
+- **Python 3.11+**
+- An OpenAI-compatible API key (OpenAI, OpenRouter, Groq, Ollama, etc.)
+- The model must support **tool / function calling**
 
-## License
+## The name
 
-MIT
+*dint* — as in *"by dint of."* Through force of your own effort.
+
+You don't learn by being told. You learn by dint of thinking.
+
+---
+
+<p align="center">
+  <sub>MIT Licensed · Built with cold coffee and stubbornness</sub>
+</p>
