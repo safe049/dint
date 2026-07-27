@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dint</title>
+<link rel="stylesheet" href="style.css">
+<!-- Markdown rendering -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+</head>
+<body>
+<div id="app">
+  <!-- Left panel: sessions -->
+  <aside id="sidebar" class="panel">
+    <div class="sidebar-header">
+      <div class="brand">
+        <span class="logo">◼</span>
+        <h1>dint</h1>
+      </div>
+      <button id="new-session-btn" class="icon-btn" title="New session">+</button>
+    </div>
+    <div id="session-list"></div>
+    <div class="sidebar-footer">
+      <button id="toggle-panels-btn" class="ghost-btn">PANELS</button>
+      <button id="settings-btn" class="ghost-btn">SETTINGS</button>
+    </div>
+  </aside>
+
+  <!-- Center panel: chat -->
+  <main id="chat-area" class="panel">
+    <div id="messages"></div>
+
+    <!-- Welcome overlay shown when no conversation is loaded -->
+    <div id="welcome" class="hidden">
+      <div class="welcome-card">
+        <div class="welcome-logo">◼</div>
+        <h2>dint</h2>
+        <p>A Socratic tutor. I don't hand you answers — I ask the
+        questions that lead you there. Tell me what you want to learn and
+        we'll build a plan together.</p>
+        <div class="welcome-chips">
+          <button class="chip">Teach me calculus from scratch</button>
+          <button class="chip">Explain recursion like I'm new to coding</button>
+          <button class="chip">Quiz me on world history</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="input-bar">
+      <textarea id="user-input" placeholder="Ask me anything…" rows="1"></textarea>
+      <button id="send-btn" title="Send">→</button>
+    </div>
+  </main>
+
+  <!-- Right panel: full-page Learner Model graph dashboard -->
+  <aside id="panels" class="panel hidden">
+    <div class="lm-header">
+      <div class="lm-title">
+        <span class="lm-logo">◈</span>
+        <h2>LEARNER MODEL</h2>
+      </div>
+      <button id="lm-close" class="icon-btn" title="Close">✕</button>
+    </div>
+    <div class="panel-tabs">
+      <button class="tab active" data-tab="progress">PROGRESS</button>
+      <button class="tab" data-tab="memory">MEMORY</button>
+      <button class="tab" data-tab="skills">SKILLS</button>
+      <button class="tab" data-tab="knowledge">KNOWLEDGE</button>
+    </div>
+    <div class="lm-toolbar">
+      <span id="lm-stat" class="lm-stat"></span>
+      <span class="lm-spacer"></span>
+      <button id="lm-add-btn" class="ghost-btn hidden">+ ADD</button>
+      <span id="lm-zoom-group">
+        <button class="lm-zoom" data-zoom="out" title="Zoom out">−</button>
+        <button class="lm-zoom" data-zoom="reset" title="Reset view">⤢</button>
+        <button class="lm-zoom" data-zoom="in" title="Zoom in">+</button>
+      </span>
+    </div>
+    <div id="lm-stage" class="lm-stage">
+      <!-- Graph view (Knowledge tab) -->
+      <svg id="lm-svg" class="lm-svg" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="lm-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#555555"></path>
+          </marker>
+        </defs>
+        <g id="lm-viewport">
+          <g id="lm-edges"></g>
+          <g id="lm-nodes"></g>
+        </g>
+      </svg>
+      <!-- List view (Progress / Memory / Skills tabs) -->
+      <div id="lm-list" class="lm-list hidden"></div>
+      <div id="lm-empty" class="lm-empty hidden">
+        <div class="lm-empty-icon">◈</div>
+        <p id="lm-empty-text">Nothing here yet.</p>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<!-- Settings modal -->
+<div id="settings-modal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2>SETTINGS</h2>
+      <button id="settings-close" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body">
+      <label>OpenAI API key
+        <input type="password" id="set-openai_api_key" placeholder="sk-…  (leave blank to keep current)">
+      </label>
+      <label>Base URL
+        <input type="text" id="set-openai_base_url" placeholder="https://api.openai.com/v1">
+      </label>
+      <label>Tutor model
+        <input type="text" id="set-dint_model" placeholder="gpt-4o-mini">
+      </label>
+      <label>Reflection model
+        <input type="text" id="set-reflect_model" placeholder="same as tutor model">
+      </label>
+      <div class="row">
+        <label>Temperature
+          <input type="number" id="set-dint_temperature" step="0.1" min="0" max="2">
+        </label>
+        <label>Max tool rounds
+          <input type="number" id="set-max_tool_rounds" min="1" max="24">
+        </label>
+        <label>Web results
+          <input type="number" id="set-web_search_results" min="1" max="10">
+        </label>
+      </div>
+      <div id="settings-status" class="status"></div>
+
+      <div class="danger-zone">
+        <h3>Danger zone</h3>
+        <p>Wipe all learner data (sessions, messages, skills, memory, knowledge graph). Settings are kept.</p>
+        <button id="clear-data-btn" class="danger-btn">CLEAR ALL DATA</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="settings-save" class="primary-btn">SAVE</button>
+    </div>
+  </div>
+</div>
+
+<!-- Generic add/edit modal for Memory / Skills / Progress items -->
+<div id="item-modal" class="modal hidden">
+  <div class="modal-backdrop"></div>
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 id="item-modal-title">EDIT</h2>
+      <button id="item-modal-close" class="icon-btn">✕</button>
+    </div>
+    <div class="modal-body" id="item-modal-body"></div>
+    <div class="modal-footer">
+      <button id="item-modal-save" class="primary-btn">SAVE</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast notifications -->
+<div id="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
