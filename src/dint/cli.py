@@ -28,11 +28,6 @@ def main() -> None:
         help="Port to listen on (default: 7070)",
     )
     parser.add_argument(
-        "--no-reload",
-        action="store_true",
-        help="Disable auto-reload (useful for production)",
-    )
-    parser.add_argument(
         "--multi-user",
         action="store_true",
         help=(
@@ -63,7 +58,7 @@ def main() -> None:
         "dint.app:app",
         host=args.host,
         port=args.port,
-        reload=not args.no_reload,
+        reload=False,
     )
 
 
