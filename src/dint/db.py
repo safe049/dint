@@ -15,6 +15,7 @@ All access is async via :mod:`aiosqlite`.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
