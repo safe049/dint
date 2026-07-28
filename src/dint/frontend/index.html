@@ -18,12 +18,13 @@
         <span class="logo">◼</span>
         <h1>dint</h1>
       </div>
-      <button id="new-session-btn" class="icon-btn" title="New session">+</button>
+      <button id="new-session-btn" class="icon-btn" data-i18n-title="new_session">+</button>
     </div>
     <div id="session-list"></div>
     <div class="sidebar-footer">
-      <button id="toggle-panels-btn" class="ghost-btn">PANELS</button>
-      <button id="settings-btn" class="ghost-btn">SETTINGS</button>
+      <button id="toggle-panels-btn" class="ghost-btn" data-i18n="panels">PANELS</button>
+      <button id="settings-btn" class="ghost-btn" data-i18n="settings">SETTINGS</button>
+      <button id="lang-btn" class="ghost-btn" title="Language">EN</button>
     </div>
   </aside>
 
@@ -36,20 +37,20 @@
       <div class="welcome-card">
         <div class="welcome-logo">◼</div>
         <h2>dint</h2>
-        <p>A Socratic tutor. I don't hand you answers — I ask the
+        <p data-i18n="welcome_text">A Socratic tutor. I don't hand you answers — I ask the
         questions that lead you there. Tell me what you want to learn and
         we'll build a plan together.</p>
         <div class="welcome-chips">
-          <button class="chip">Teach me calculus from scratch</button>
-          <button class="chip">Explain recursion like I'm new to coding</button>
-          <button class="chip">Quiz me on world history</button>
+          <button class="chip" data-i18n="chip_calculus">Teach me calculus from scratch</button>
+          <button class="chip" data-i18n="chip_recursion">Explain recursion like I'm new to coding</button>
+          <button class="chip" data-i18n="chip_history">Quiz me on world history</button>
         </div>
       </div>
     </div>
 
     <div id="input-bar">
-      <textarea id="user-input" placeholder="Ask me anything…" rows="1"></textarea>
-      <button id="send-btn" title="Send">→</button>
+      <textarea id="user-input" data-i18n-ph="input_placeholder" placeholder="Ask me anything…" rows="1"></textarea>
+      <button id="send-btn" data-i18n-title="send">→</button>
     </div>
   </main>
 
@@ -58,24 +59,24 @@
     <div class="lm-header">
       <div class="lm-title">
         <span class="lm-logo">◈</span>
-        <h2>LEARNER MODEL</h2>
+        <h2 data-i18n="lm_title">LEARNER MODEL</h2>
       </div>
-      <button id="lm-close" class="icon-btn" title="Close">✕</button>
+      <button id="lm-close" class="icon-btn" data-i18n-title="close">✕</button>
     </div>
     <div class="panel-tabs">
-      <button class="tab active" data-tab="progress">PROGRESS</button>
-      <button class="tab" data-tab="memory">MEMORY</button>
-      <button class="tab" data-tab="skills">SKILLS</button>
-      <button class="tab" data-tab="knowledge">KNOWLEDGE</button>
+      <button class="tab active" data-tab="progress" data-i18n="tab_progress">PROGRESS</button>
+      <button class="tab" data-tab="memory" data-i18n="tab_memory">MEMORY</button>
+      <button class="tab" data-tab="skills" data-i18n="tab_skills">SKILLS</button>
+      <button class="tab" data-tab="knowledge" data-i18n="tab_knowledge">KNOWLEDGE</button>
     </div>
     <div class="lm-toolbar">
       <span id="lm-stat" class="lm-stat"></span>
       <span class="lm-spacer"></span>
-      <button id="lm-add-btn" class="ghost-btn hidden">+ ADD</button>
+      <button id="lm-add-btn" class="ghost-btn hidden" data-i18n="add">+ ADD</button>
       <span id="lm-zoom-group">
-        <button class="lm-zoom" data-zoom="out" title="Zoom out">−</button>
-        <button class="lm-zoom" data-zoom="reset" title="Reset view">⤢</button>
-        <button class="lm-zoom" data-zoom="in" title="Zoom in">+</button>
+        <button class="lm-zoom" data-zoom="out" data-i18n-title="zoom_out">−</button>
+        <button class="lm-zoom" data-zoom="reset" data-i18n-title="zoom_reset">⤢</button>
+        <button class="lm-zoom" data-zoom="in" data-i18n-title="zoom_in">+</button>
       </span>
     </div>
     <div id="lm-stage" class="lm-stage">
@@ -96,7 +97,7 @@
       <div id="lm-list" class="lm-list hidden"></div>
       <div id="lm-empty" class="lm-empty hidden">
         <div class="lm-empty-icon">◈</div>
-        <p id="lm-empty-text">Nothing here yet.</p>
+        <p id="lm-empty-text" data-i18n="lm_empty">Nothing here yet.</p>
       </div>
     </div>
   </aside>
@@ -107,43 +108,45 @@
   <div class="modal-backdrop"></div>
   <div class="modal-card">
     <div class="modal-header">
-      <h2>SETTINGS</h2>
+      <h2 data-i18n="settings_title">SETTINGS</h2>
       <button id="settings-close" class="icon-btn">✕</button>
     </div>
     <div class="modal-body">
-      <label>OpenAI API key
-        <input type="password" id="set-openai_api_key" placeholder="sk-…  (leave blank to keep current)">
+      <label><span data-i18n="set_api_key">OpenAI API key</span>
+        <input type="password" id="set-openai_api_key" data-i18n-ph="set_api_key_ph" placeholder="sk-…  (leave blank to keep current)">
       </label>
-      <label>Base URL
+      <label><span data-i18n="set_base_url">Base URL</span>
         <input type="text" id="set-openai_base_url" placeholder="https://api.openai.com/v1">
       </label>
-      <label>Tutor model
+      <label><span data-i18n="set_tutor_model">Tutor model</span>
         <input type="text" id="set-dint_model" placeholder="gpt-4o-mini">
       </label>
-      <label>Reflection model
+      <label><span data-i18n="set_reflect_model">Reflection model</span>
         <input type="text" id="set-reflect_model" placeholder="same as tutor model">
       </label>
       <div class="row">
-        <label>Temperature
+        <label><span data-i18n="set_temperature">Temperature</span>
           <input type="number" id="set-dint_temperature" step="0.1" min="0" max="2">
         </label>
-        <label>Max tool rounds
+        <label><span data-i18n="set_max_rounds">Max tool rounds</span>
           <input type="number" id="set-max_tool_rounds" min="1" max="24">
         </label>
-        <label>Web results
+        <label><span data-i18n="set_web_results">Web results</span>
           <input type="number" id="set-web_search_results" min="1" max="10">
         </label>
       </div>
       <div id="settings-status" class="status"></div>
 
       <div class="danger-zone">
-        <h3>Danger zone</h3>
-        <p>Wipe all learner data (sessions, messages, skills, memory, knowledge graph). Settings are kept.</p>
-        <button id="clear-data-btn" class="danger-btn">CLEAR ALL DATA</button>
+        <h3 data-i18n="danger_zone">Danger zone</h3>
+        <p data-i18n="consolidate_text">Merge duplicate / overlapping long-term memories into concise entries.</p>
+        <button id="consolidate-btn" class="ghost-btn" data-i18n="consolidate">CONSOLIDATE MEMORY</button>
+        <p data-i18n="danger_text">Wipe all learner data (sessions, messages, skills, memory, knowledge graph). Settings are kept.</p>
+        <button id="clear-data-btn" class="danger-btn" data-i18n="clear_data">CLEAR ALL DATA</button>
       </div>
     </div>
     <div class="modal-footer">
-      <button id="settings-save" class="primary-btn">SAVE</button>
+      <button id="settings-save" class="primary-btn" data-i18n="save">SAVE</button>
     </div>
   </div>
 </div>
@@ -153,12 +156,23 @@
   <div class="modal-backdrop"></div>
   <div class="modal-card">
     <div class="modal-header">
-      <h2 id="item-modal-title">EDIT</h2>
+      <h2 id="item-modal-title" data-i18n="modal_edit">EDIT</h2>
       <button id="item-modal-close" class="icon-btn">✕</button>
     </div>
     <div class="modal-body" id="item-modal-body"></div>
     <div class="modal-footer">
-      <button id="item-modal-save" class="primary-btn">SAVE</button>
+      <button id="item-modal-save" class="primary-btn" data-i18n="save">SAVE</button>
+    </div>
+  </div>
+</div>
+
+<!-- Consolidation blocking overlay -->
+<div id="consolidate-overlay" class="consolidate-overlay hidden">
+  <div class="consolidate-card">
+    <div class="consolidate-icon">◈</div>
+    <p id="consolidate-label" data-i18n="consolidate_running">Consolidating memory…</p>
+    <div class="consolidate-progress">
+      <div class="consolidate-progress-bar"></div>
     </div>
   </div>
 </div>
@@ -166,6 +180,7 @@
 <!-- Toast notifications -->
 <div id="toasts"></div>
 
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

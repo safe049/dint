@@ -14,6 +14,8 @@ const state = {
   sessionId: null,
   sessions: [],
   sending: false,
+  abort: null, // AbortController for the active stream (if any)
+  autoScroll: true, // stick to bottom unless the user scrolls up
 };
 
 /* ------------------------------------------------------------------ */
@@ -59,7 +61,25 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
+/* Remove fenced code blocks that contain model tool-call payloads
+ * (e.g. ```json {"tool_calls": [...]} ```) so they are not shown to the
+ * user as ordinary code. Handles both complete blocks and an unterminated
+ * trailing block that may appear mid-stream. */
+function stripToolCallBlocks(text) {
+  if (!text) return text;
+  // Complete fenced blocks (``` ... ```) whose body mentions tool_calls.
+  let out = text.replace(/```[^\n]*\n[\s\S]*?```/g, (block) =>
+    /"tool_calls"\s*:|tool_calls/.test(block) ? "" : block
+  );
+  // Unterminated trailing fence (still streaming) that mentions tool_calls.
+  out = out.replace(/```[^\n]*\n[\s\S]*$/, (block) =>
+    /"tool_calls"\s*:|tool_calls/.test(block) ? "" : block
+  );
+  return out;
+}
+
 function renderMarkdown(text) {
+  text = stripToolCallBlocks(text);
   if (window.marked && window.DOMPurify) {
     const html = marked.parse(text || "", { breaks: true });
     return DOMPurify.sanitize(html);
@@ -86,7 +106,7 @@ function renderSessionList() {
   if (!state.sessions.length) {
     const empty = document.createElement("div");
     empty.className = "no-sessions";
-    empty.textContent = "No sessions yet — start one below.";
+    empty.textContent = t("no_sessions");
     list.appendChild(empty);
     return;
   }
@@ -97,7 +117,7 @@ function renderSessionList() {
 
     const title = document.createElement("div");
     title.className = "session-title";
-    title.textContent = s.title || "Untitled session";
+    title.textContent = s.title || t("untitled_session");
 
     const meta = document.createElement("div");
     meta.className = "session-meta";
@@ -107,7 +127,7 @@ function renderSessionList() {
     const del = document.createElement("button");
     del.className = "session-del";
     del.textContent = "✕";
-    del.title = "Delete session";
+    del.title = t("delete_session");
     del.onclick = (ev) => {
       ev.stopPropagation();
       deleteSession(s.id);
@@ -139,12 +159,12 @@ async function newSession() {
     await loadSessions();
     await openSession(res.id);
   } catch (e) {
-    toast("Could not create session: " + e.message, "error");
+    toast(t("err_create_session", { msg: e.message }), "error");
   }
 }
 
 async function deleteSession(id) {
-  if (!confirm("Delete this session and its messages?")) return;
+  if (!confirm(t("confirm_delete_session"))) return;
   try {
     await api("DELETE", `/api/sessions/${id}`);
     if (state.sessionId === id) {
@@ -155,12 +175,13 @@ async function deleteSession(id) {
     await loadSessions();
     if (lmState.tab === "progress") renderLearnerModel();
   } catch (e) {
-    toast("Delete failed: " + e.message, "error");
+    toast(t("err_delete", { msg: e.message }), "error");
   }
 }
 
 async function openSession(id) {
   state.sessionId = id;
+  state.autoScroll = true;
   renderSessionList();
   $("#welcome").classList.add("hidden");
   const msgs = await api("GET", `/api/sessions/${id}/messages`);
@@ -173,20 +194,20 @@ function renderMessages(msgs) {
   box.innerHTML = "";
   for (const m of msgs) {
     if (m.role === "user") {
-      appendMessage("user", m.content);
+      appendMessage("user", m.content, m.created_at);
     } else if (m.role === "assistant") {
-      appendMessage("assistant", m.content);
+      appendMessage("assistant", m.content, m.created_at);
     }
     // tool / system rows are skipped in the transcript
   }
-  scrollChat();
+  scrollChat(true);
 }
 
 /* ------------------------------------------------------------------ */
 /* Chat                                                               */
 /* ------------------------------------------------------------------ */
 
-function appendMessage(role, content) {
+function appendMessage(role, content, ts) {
   const box = $("#messages");
   const wrap = document.createElement("div");
   wrap.className = `msg ${role}`;
@@ -194,19 +215,38 @@ function appendMessage(role, content) {
   bubble.className = "bubble md";
   if (role === "assistant") {
     bubble.innerHTML = renderMarkdown(content);
+    const actions = document.createElement("div");
+    actions.className = "msg-actions";
     const retry = document.createElement("button");
-    retry.className = "retry-btn";
-    retry.textContent = "↻ Retry";
-    retry.title = "Regenerate this response";
+    retry.className = "msg-action-btn";
+    retry.textContent = t("retry");
+    retry.title = t("retry_title");
     retry.onclick = () => regenerateReply();
+    const copy = document.createElement("button");
+    copy.className = "msg-action-btn";
+    copy.textContent = t("copy");
+    copy.title = t("copy_title");
+    copy.onclick = () => copyText(bubble.innerText, copy);
+    actions.appendChild(retry);
+    actions.appendChild(copy);
     wrap.appendChild(bubble);
-    wrap.appendChild(retry);
+    wrap.appendChild(actions);
   } else {
     bubble.textContent = content;
     wrap.appendChild(bubble);
   }
+  // Timestamp footer.
+  const time = document.createElement("div");
+  time.className = "msg-time";
+  time.textContent = fmtMsgTime(ts);
+  wrap.appendChild(time);
   box.appendChild(wrap);
   return bubble;
+}
+
+function fmtMsgTime(ts) {
+  const d = ts ? new Date(ts * 1000) : new Date();
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function appendToolChip(bubble, name, args) {
@@ -233,9 +273,41 @@ function short(v) {
   return s.length > 24 ? s.slice(0, 24) + "…" : s;
 }
 
-function scrollChat() {
+function scrollChat(force) {
   const box = $("#messages");
-  box.scrollTop = box.scrollHeight;
+  if (force || state.autoScroll) box.scrollTop = box.scrollHeight;
+}
+
+/* True when the user is parked near the bottom of the transcript. */
+function nearBottom(box, threshold = 80) {
+  return box.scrollHeight - box.scrollTop - box.clientHeight < threshold;
+}
+
+/* Abort the in-flight stream (Stop button / Escape). */
+function stopStream() {
+  if (state.abort) {
+    state.abort.abort();
+    state.abort = null;
+  }
+}
+
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    // Fallback for non-secure contexts.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  if (btn) {
+    const prev = btn.textContent;
+    btn.textContent = t("copied");
+    setTimeout(() => (btn.textContent = prev), 1200);
+  }
 }
 
 async function sendMessage() {
@@ -251,21 +323,23 @@ async function sendMessage() {
   }
 
   state.sending = true;
-  $("#send-btn").disabled = true;
+  state.autoScroll = true;
+  setSendStopMode(true);
   input.value = "";
   autoresize(input);
 
   appendMessage("user", text);
-  scrollChat();
+  scrollChat(true);
 
   const bubble = appendMessage("assistant", "");
   bubble.classList.add("streaming");
   let acc = "";
 
+  state.abort = new AbortController();
   try {
     await streamChat(text, {
-      onToken: (t) => {
-        acc += t;
+      onToken: (tok) => {
+        acc += tok;
         bubble.innerHTML = renderMarkdown(acc);
         scrollChat();
       },
@@ -276,20 +350,41 @@ async function sendMessage() {
           bubble.innerHTML = renderMarkdown(acc);
         }
       },
-    });
+    }, state.abort.signal);
   } catch (e) {
-    if (!acc) {
+    if (e.name === "AbortError") {
+      if (!acc) bubble.innerHTML = renderMarkdown("…");
+    } else if (!acc) {
       bubble.innerHTML = renderMarkdown("⚠️ " + e.message);
     } else {
-      toast("Stream error: " + e.message, "error");
+      toast(t("err_stream", { msg: e.message }), "error");
     }
   } finally {
     bubble.classList.remove("streaming");
     state.sending = false;
-    $("#send-btn").disabled = false;
-    scrollChat();
+    state.abort = null;
+    setSendStopMode(false);
+    scrollChat(true);
     loadSessions();
     renderLearnerModel();
+  }
+}
+
+/* Swap the send button between send (→) and stop (■) while streaming. */
+function setSendStopMode(stopping) {
+  const btn = $("#send-btn");
+  if (stopping) {
+    btn.textContent = "■";
+    btn.title = t("stop");
+    btn.disabled = false;
+    btn.classList.add("stop-mode");
+    btn.onclick = stopStream;
+  } else {
+    btn.textContent = "→";
+    btn.title = t("send");
+    btn.disabled = false;
+    btn.classList.remove("stop-mode");
+    btn.onclick = sendMessage;
   }
 }
 
@@ -303,15 +398,17 @@ async function regenerateReply() {
   const bubble = bubbles[bubbles.length - 1];
 
   state.sending = true;
-  $("#send-btn").disabled = true;
+  state.autoScroll = true;
+  setSendStopMode(true);
   bubble.innerHTML = "";
   bubble.classList.add("streaming");
   let acc = "";
 
+  state.abort = new AbortController();
   try {
     await streamRegenerate({
-      onToken: (t) => {
-        acc += t;
+      onToken: (tok) => {
+        acc += tok;
         bubble.innerHTML = renderMarkdown(acc);
         scrollChat();
       },
@@ -322,28 +419,32 @@ async function regenerateReply() {
           bubble.innerHTML = renderMarkdown(acc);
         }
       },
-    });
+    }, state.abort.signal);
   } catch (e) {
-    if (!acc) {
+    if (e.name === "AbortError") {
+      if (!acc) bubble.innerHTML = renderMarkdown("…");
+    } else if (!acc) {
       bubble.innerHTML = renderMarkdown("⚠️ " + e.message);
     } else {
-      toast("Stream error: " + e.message, "error");
+      toast(t("err_stream", { msg: e.message }), "error");
     }
   } finally {
     bubble.classList.remove("streaming");
     state.sending = false;
-    $("#send-btn").disabled = false;
-    scrollChat();
+    state.abort = null;
+    setSendStopMode(false);
+    scrollChat(true);
     loadSessions();
     renderLearnerModel();
   }
 }
 
-async function streamRegenerate(handlers) {
+async function streamRegenerate(handlers, signal) {
   const res = await fetch("/api/chat/regenerate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: state.sessionId }),
+    signal,
   });
   if (!res.ok || !res.body) {
     let detail = res.statusText;
@@ -356,11 +457,12 @@ async function streamRegenerate(handlers) {
   await consumeSseStream(res, handlers);
 }
 
-async function streamChat(message, handlers) {
+async function streamChat(message, handlers, signal) {
   const res = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: state.sessionId, message }),
+    signal,
   });
   if (!res.ok || !res.body) {
     let detail = res.statusText;
@@ -408,7 +510,8 @@ function handleSseBlock(block, handlers) {
   } catch (_) {
     data = dataLines.join("\n");
   }
-  if (event === "token" && handlers.onToken) handlers.onToken(data.token || "");
+  if (event === "token" && handlers.onToken)
+    handlers.onToken(typeof data === "string" ? data : data.token || "");
   else if (event === "tool_call" && handlers.onToolCall)
     handlers.onToolCall(data.name, data.arguments);
   else if (event === "done" && handlers.onDone) handlers.onDone(data);
@@ -523,12 +626,12 @@ function buildRow(titleText, metaText, badgeText, badgeClass, onEdit, onDelete) 
   const edit = document.createElement("button");
   edit.className = "lm-row-btn";
   edit.textContent = "✎";
-  edit.title = "Edit";
+  edit.title = t("edit");
   edit.onclick = onEdit;
   const del = document.createElement("button");
   del.className = "lm-row-btn danger";
   del.textContent = "✕";
-  del.title = "Delete";
+  del.title = t("delete");
   del.onclick = onDelete;
   actions.appendChild(edit);
   actions.appendChild(del);
@@ -543,19 +646,19 @@ async function renderProgressList() {
   list.innerHTML = "";
   if (!state.sessionId) {
     lmStat("");
-    showLmEmpty(true, "Open a session to see its concept progress.");
+    showLmEmpty(true, t("lm_open_session"));
     return;
   }
   let items;
   try {
     items = await api("GET", `/api/sessions/${state.sessionId}/progress`);
   } catch (e) {
-    toast("Failed to load progress", "error");
+    toast(t("err_load_progress"), "error");
     return;
   }
-  lmStat(`${items.length} concept${items.length === 1 ? "" : "s"}`);
+  lmStat(t("stat_concepts", { n: items.length, s: items.length === 1 ? "" : "s" }));
   if (!items.length) {
-    showLmEmpty(true, "No concepts tracked in this session yet.");
+    showLmEmpty(true, t("lm_no_concepts"));
     return;
   }
   showLmEmpty(false);
@@ -569,7 +672,9 @@ async function renderProgressList() {
 }
 
 function statusLabel(s) {
-  return s === "demonstrated" ? "demonstrated" : s === "next" ? "up next" : "locked";
+  if (s === "demonstrated") return t("status_demonstrated");
+  if (s === "next") return t("status_next");
+  return t("status_locked");
 }
 
 function progressRow(item) {
@@ -584,32 +689,32 @@ function progressRow(item) {
 }
 
 async function deleteProgress(item) {
-  if (!confirm(`Remove concept "${item.concept}"?`)) return;
+  if (!confirm(t("confirm_delete_concept", { name: item.concept }))) return;
   try {
     await api("DELETE", `/api/sessions/${state.sessionId}/progress`, {
       concept: item.concept,
     });
     renderLearnerModel();
   } catch (e) {
-    toast("Delete failed: " + e.message, "error");
+    toast(t("err_delete", { msg: e.message }), "error");
   }
 }
 
 function openProgressModal(existing) {
   const isEdit = !!existing;
   openItemModal(
-    isEdit ? "EDIT CONCEPT" : "ADD CONCEPT",
+    isEdit ? t("title_edit_concept") : t("title_add_concept"),
     [
       {
         name: "concept",
-        label: "Concept",
+        label: t("field_concept"),
         type: "text",
         value: isEdit ? existing.concept : "",
-        placeholder: "e.g. Chain rule",
+        placeholder: t("ph_concept"),
       },
       {
         name: "status",
-        label: "Status",
+        label: t("field_status"),
         type: "select",
         options: ["locked", "next", "demonstrated"],
         value: isEdit ? existing.status : "next",
@@ -618,7 +723,7 @@ function openProgressModal(existing) {
     async (v) => {
       const concept = v.concept.trim();
       if (!concept) {
-        toast("Concept name required", "error");
+        toast(t("err_concept_required"), "error");
         return;
       }
       try {
@@ -635,7 +740,7 @@ function openProgressModal(existing) {
         closeItemModal();
         renderLearnerModel();
       } catch (e) {
-        toast("Save failed: " + e.message, "error");
+        toast(t("err_save", { msg: e.message }), "error");
       }
     }
   );
@@ -650,12 +755,12 @@ async function renderMemoryList() {
   try {
     items = await api("GET", "/api/memory");
   } catch (e) {
-    toast("Failed to load memory", "error");
+    toast(t("err_load_memory"), "error");
     return;
   }
-  lmStat(`${items.length} entr${items.length === 1 ? "y" : "ies"}`);
+  lmStat(t("stat_entries", { n: items.length, y: items.length === 1 ? "y" : "ies" }));
   if (!items.length) {
-    showLmEmpty(true, "No long-term memories yet.");
+    showLmEmpty(true, t("lm_no_memory"));
     return;
   }
   showLmEmpty(false);
@@ -675,7 +780,7 @@ async function renderMemoryList() {
 function memoryRow(item) {
   return buildRow(
     item.content,
-    item.created_at ? "added " + fmtDate(item.created_at) : null,
+    item.created_at ? t("added", { when: fmtDate(item.created_at) }) : null,
     item.kind,
     "kind-" + item.kind,
     () => openMemoryModal(item),
@@ -684,39 +789,39 @@ function memoryRow(item) {
 }
 
 async function deleteMemory(item) {
-  if (!confirm("Delete this memory?")) return;
+  if (!confirm(t("confirm_delete_memory"))) return;
   try {
     await api("DELETE", `/api/memory/${item.id}`);
     renderLearnerModel();
   } catch (e) {
-    toast("Delete failed: " + e.message, "error");
+    toast(t("err_delete", { msg: e.message }), "error");
   }
 }
 
 function openMemoryModal(existing) {
   const isEdit = !!existing;
   openItemModal(
-    isEdit ? "EDIT MEMORY" : "ADD MEMORY",
+    isEdit ? t("title_edit_memory") : t("title_add_memory"),
     [
       {
         name: "kind",
-        label: "Kind",
+        label: t("field_kind"),
         type: "select",
         options: ["note", "fact", "preference", "goal"],
         value: isEdit ? existing.kind : "note",
       },
       {
         name: "content",
-        label: "Content",
+        label: t("field_content"),
         type: "textarea",
         value: isEdit ? existing.content : "",
-        placeholder: "e.g. Prefers worked examples before exercises",
+        placeholder: t("ph_memory"),
       },
     ],
     async (v) => {
       const content = v.content.trim();
       if (!content) {
-        toast("Content required", "error");
+        toast(t("err_content_required"), "error");
         return;
       }
       try {
@@ -731,7 +836,7 @@ function openMemoryModal(existing) {
         closeItemModal();
         renderLearnerModel();
       } catch (e) {
-        toast("Save failed: " + e.message, "error");
+        toast(t("err_save", { msg: e.message }), "error");
       }
     }
   );
@@ -746,12 +851,12 @@ async function renderSkillsList() {
   try {
     items = await api("GET", "/api/skills");
   } catch (e) {
-    toast("Failed to load skills", "error");
+    toast(t("err_load_skills"), "error");
     return;
   }
-  lmStat(`${items.length} skill${items.length === 1 ? "" : "s"}`);
+  lmStat(t("stat_skills", { n: items.length, s: items.length === 1 ? "" : "s" }));
   if (!items.length) {
-    showLmEmpty(true, "No skills estimated yet.");
+    showLmEmpty(true, t("lm_no_skills"));
     return;
   }
   showLmEmpty(false);
@@ -771,7 +876,8 @@ async function renderSkillsList() {
 function skillRow(item) {
   const pct = Math.round((item.confidence || 0) * 100);
   const evidence = (item.evidence || []).length;
-  const meta = `${pct}% confidence${evidence ? ` · ${evidence} note${evidence === 1 ? "" : "s"}` : ""}`;
+  let meta = t("confidence", { pct });
+  if (evidence) meta += " · " + t("notes", { n: evidence, s: evidence === 1 ? "" : "s" });
   return buildRow(
     item.name,
     meta,
@@ -783,44 +889,44 @@ function skillRow(item) {
 }
 
 async function deleteSkill(item) {
-  if (!confirm(`Delete skill "${item.name}"?`)) return;
+  if (!confirm(t("confirm_delete_skill", { name: item.name }))) return;
   try {
     await api("DELETE", `/api/skills/${encodeURIComponent(item.name)}`);
     renderLearnerModel();
   } catch (e) {
-    toast("Delete failed: " + e.message, "error");
+    toast(t("err_delete", { msg: e.message }), "error");
   }
 }
 
 function openSkillModal(existing) {
   const isEdit = !!existing;
   openItemModal(
-    isEdit ? "EDIT SKILL" : "ADD SKILL",
+    isEdit ? t("title_edit_skill") : t("title_add_skill"),
     [
       {
         name: "name",
-        label: "Name",
+        label: t("field_name"),
         type: "text",
         value: isEdit ? existing.name : "",
-        placeholder: "e.g. Integration by parts",
+        placeholder: t("ph_skill"),
       },
       {
         name: "domain",
-        label: "Domain",
+        label: t("field_domain"),
         type: "text",
         value: isEdit ? existing.domain || "" : "",
-        placeholder: "e.g. Calculus",
+        placeholder: t("ph_domain"),
       },
       {
         name: "status",
-        label: "Status",
+        label: t("field_status"),
         type: "select",
         options: ["locked", "emerging", "demonstrated"],
         value: isEdit ? existing.status : "emerging",
       },
       {
         name: "confidence",
-        label: "Confidence (0–1)",
+        label: t("field_confidence"),
         type: "number",
         step: "0.05",
         min: "0",
@@ -831,7 +937,7 @@ function openSkillModal(existing) {
     async (v) => {
       const name = v.name.trim();
       if (!name) {
-        toast("Skill name required", "error");
+        toast(t("err_skill_required"), "error");
         return;
       }
       const confidence = Math.max(0, Math.min(1, parseFloat(v.confidence) || 0));
@@ -852,7 +958,7 @@ function openSkillModal(existing) {
         closeItemModal();
         renderLearnerModel();
       } catch (e) {
-        toast("Save failed: " + e.message, "error");
+        toast(t("err_save", { msg: e.message }), "error");
       }
     }
   );
@@ -865,16 +971,16 @@ async function renderKnowledgeGraph() {
   try {
     data = await api("GET", "/api/knowledge");
   } catch (e) {
-    toast("Failed to load knowledge graph", "error");
+    toast(t("err_load_knowledge"), "error");
     return;
   }
   lmState.nodes = data.nodes || [];
   lmState.edges = data.edges || [];
   lmStat(
-    `${lmState.nodes.length} nodes · ${lmState.edges.length} edges`
+    t("stat_graph", { nodes: lmState.nodes.length, edges: lmState.edges.length })
   );
   if (!lmState.nodes.length) {
-    showLmEmpty(true, "Knowledge graph is empty.");
+    showLmEmpty(true, t("lm_no_knowledge"));
     $("#lm-nodes").innerHTML = "";
     $("#lm-edges").innerHTML = "";
     return;
@@ -1187,13 +1293,13 @@ function showNodeMenu(ev, node) {
   menu.dataset.label = node.label;
 
   const rename = document.createElement("button");
-  rename.textContent = "✎ Rename";
+  rename.textContent = t("rename");
   rename.onclick = () => {
     hideNodeMenu();
     openRenameNodeModal(node);
   };
   const del = document.createElement("button");
-  del.textContent = "✕ Delete";
+  del.textContent = t("delete_node");
   del.className = "danger";
   del.onclick = () => {
     hideNodeMenu();
@@ -1215,11 +1321,11 @@ function hideNodeMenu() {
 
 function openRenameNodeModal(node) {
   openItemModal(
-    "RENAME CONCEPT",
+    t("title_rename_concept"),
     [
       {
         name: "new_label",
-        label: "New label",
+        label: t("field_new_label"),
         type: "text",
         value: node.label,
       },
@@ -1227,7 +1333,7 @@ function openRenameNodeModal(node) {
     async (v) => {
       const newLabel = v.new_label.trim();
       if (!newLabel) {
-        toast("Label required", "error");
+        toast(t("err_label_required"), "error");
         return;
       }
       try {
@@ -1239,23 +1345,23 @@ function openRenameNodeModal(node) {
         // Reset positions so the renamed node re-lays out cleanly.
         lmState.pos.clear();
         renderLearnerModel();
-        toast("Renamed (edges preserved)", "success");
+        toast(t("toast_renamed"), "success");
       } catch (e) {
-        toast("Rename failed: " + e.message, "error");
+        toast(t("err_rename", { msg: e.message }), "error");
       }
     }
   );
 }
 
 async function deleteNode(node) {
-  if (!confirm(`Delete concept "${node.label}" and its edges?`)) return;
+  if (!confirm(t("confirm_delete_node", { name: node.label }))) return;
   try {
     await api("DELETE", "/api/knowledge/nodes", { label: node.label });
     lmState.pos.delete(node.id);
     renderLearnerModel();
-    toast("Node deleted", "success");
+    toast(t("toast_node_deleted"), "success");
   } catch (e) {
-    toast("Delete failed: " + e.message, "error");
+    toast(t("err_delete", { msg: e.message }), "error");
   }
 }
 
@@ -1339,8 +1445,8 @@ async function openSettings() {
     if (key === "openai_api_key") {
       el.value = "";
       el.placeholder = cfg.openai_api_key
-        ? `current: ${cfg.openai_api_key}`
-        : "sk-…";
+        ? t("set_current", { val: cfg.openai_api_key })
+        : t("set_api_key_ph");
     } else {
       el.value = cfg[key] ?? "";
     }
@@ -1372,7 +1478,7 @@ async function saveSettings() {
   const status = $("#settings-status");
   try {
     await api("PUT", "/api/settings", { settings: payload });
-    status.textContent = "Saved ✓";
+    status.textContent = t("saved");
     status.className = "status ok";
     setTimeout(closeSettings, 500);
   } catch (e) {
@@ -1381,18 +1487,39 @@ async function saveSettings() {
   }
 }
 
+async function consolidateMemory() {
+  if (!confirm(t("confirm_consolidate"))) return;
+  const overlay = $("#consolidate-overlay");
+  overlay.classList.remove("hidden");
+  try {
+    const res = await api("POST", "/api/consolidate");
+    toast(
+      t("toast_consolidated", {
+        merged: res.merged || 0,
+        removed: res.removed || 0,
+      }),
+      "success"
+    );
+    renderLearnerModel();
+  } catch (e) {
+    toast(t("err_consolidate", { msg: e.message }), "error");
+  } finally {
+    overlay.classList.add("hidden");
+  }
+}
+
 async function clearAllData() {
-  if (
-    !confirm(
-      "This wipes ALL learner data: sessions, messages, skills, memory and the knowledge graph. Settings are kept. Continue?"
-    )
-  )
-    return;
+  if (!confirm(t("confirm_reset"))) return;
   try {
     const res = await api("POST", "/api/reset");
     const d = res.deleted || {};
     toast(
-      `Cleared ${d.sessions || 0} sessions, ${d.skills || 0} skills, ${d.memory || 0} memories, ${d.knowledge_nodes || 0} concepts`,
+      t("toast_cleared", {
+        sessions: d.sessions || 0,
+        skills: d.skills || 0,
+        memory: d.memory || 0,
+        concepts: d.knowledge_nodes || 0,
+      }),
       "success"
     );
     state.sessionId = null;
@@ -1403,7 +1530,7 @@ async function clearAllData() {
     renderLearnerModel();
     closeSettings();
   } catch (e) {
-    toast("Reset failed: " + e.message, "error");
+    toast(t("err_reset", { msg: e.message }), "error");
   }
 }
 
@@ -1432,6 +1559,31 @@ function bindEvents() {
     }
   });
   input.addEventListener("input", () => autoresize(input));
+
+  // Smart auto-scroll: stick to the bottom only while the user is near it.
+  const box = $("#messages");
+  box.addEventListener("scroll", () => {
+    state.autoScroll = nearBottom(box);
+  });
+
+  // Escape stops an in-flight stream.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.sending) stopStream();
+  });
+
+  // Language toggle.
+  const langBtn = $("#lang-btn");
+  if (langBtn) {
+    langBtn.textContent = i18n.label();
+    langBtn.title = t("language");
+    langBtn.onclick = () => {
+      i18n.cycle();
+      // Re-render dynamic text that isn't covered by data-i18n attributes.
+      renderSessionList();
+      renderLearnerModel();
+      setSendStopMode(state.sending);
+    };
+  }
 
   // Welcome chips.
   $$(".welcome-chips .chip").forEach((chip) => {
@@ -1471,6 +1623,8 @@ function bindEvents() {
   $("#settings-close").onclick = closeSettings;
   $("#settings-save").onclick = saveSettings;
   $("#clear-data-btn").onclick = clearAllData;
+  const consolidateBtn = $("#consolidate-btn");
+  if (consolidateBtn) consolidateBtn.onclick = consolidateMemory;
   $$("#settings-modal .modal-backdrop").forEach((b) => (b.onclick = closeSettings));
 
   // Item modal.
@@ -1482,6 +1636,8 @@ function bindEvents() {
 }
 
 async function init() {
+  // Resolve language and translate static markup before first paint of text.
+  i18n.setLang(i18n.detect());
   bindEvents();
   initGraphInteractions();
   await loadSessions();

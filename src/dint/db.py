@@ -209,59 +209,108 @@ class Database:
         subject: Optional[str] = None,
         summary: Optional[str] = None,
     ) -> bool:
-        """Rename a knowledge node, merging into an existing node if the target
-        label already exists. Edges are preserved. Returns True on success."""
+        """Merge every node labelled ``old_label`` into a single canonical node
+        labelled ``new_label``.
+
+        Because ``knowledge_nodes`` is UNIQUE(label, subject), the same label can
+        legitimately appear several times with different subjects (e.g. "port"
+        under "C networking API" and "computer networking"). A label-based merge
+        must therefore collapse ALL same-label rows, not just the first one, and
+        must not blindly rewrite the canonical node's subject (doing so can
+        collide with an existing (label, subject) row and raise IntegrityError,
+        which previously aborted the whole merge). Edges are re-pointed to the
+        canonical node; self-loops and duplicate edges created by the merge are
+        removed. Returns True on success.
+        """
         old_label = old_label.strip()
         new_label = new_label.strip()
+        if not old_label or not new_label:
+            return False
         async with self._conn() as db:
-            rows = await db.execute_fetchall(
-                "SELECT id FROM knowledge_nodes WHERE label = ?", (old_label,)
+            old_rows = await db.execute_fetchall(
+                "SELECT id, subject FROM knowledge_nodes WHERE label = ?",
+                (old_label,),
             )
-            if not rows:
+            if not old_rows:
                 return False
-            node_id = rows[0]["id"]
-            existing = await db.execute_fetchall(
-                "SELECT id FROM knowledge_nodes WHERE label = ?", (new_label,)
+            old_ids = [r["id"] for r in old_rows]
+            old_id_set = set(old_ids)
+
+            # Existing canonical nodes (same target label) that are NOT among the
+            # old rows being merged.
+            target_rows = await db.execute_fetchall(
+                "SELECT id, subject FROM knowledge_nodes WHERE label = ?",
+                (new_label,),
             )
-            if existing and existing[0]["id"] != node_id:
-                # Merge: re-point edges to the existing target, then drop old node.
-                target_id = existing[0]["id"]
+            target_rows = [t for t in target_rows if t["id"] not in old_id_set]
+
+            if target_rows:
+                # Prefer a target whose subject matches the requested one, else
+                # keep the first (most recent) target as canonical.
+                primary = target_rows[0]
+                if subject:
+                    for t in target_rows:
+                        if (t["subject"] or "") == subject:
+                            primary = t
+                            break
+                target_id = primary["id"]
+                # Any other same-label targets also collapse into the canonical.
+                collapse_ids = [t["id"] for t in target_rows if t["id"] != target_id]
+                merge_ids = old_ids + collapse_ids
+            else:
+                # No existing target: promote one old node to canonical, merge the
+                # remaining old nodes into it.
+                target_id = old_ids[0]
+                merge_ids = old_ids[1:]
+
+            # Re-point edges from every merged node to the canonical node. OR
+            # IGNORE keeps an existing identical edge rather than erroring; the
+            # leftover stale edge is removed by the DELETE below.
+            for mid in merge_ids:
                 await db.execute(
                     "UPDATE OR IGNORE knowledge_edges SET src_id = ? WHERE src_id = ?",
-                    (target_id, node_id),
+                    (target_id, mid),
                 )
                 await db.execute(
                     "UPDATE OR IGNORE knowledge_edges SET dst_id = ? WHERE dst_id = ?",
-                    (target_id, node_id),
+                    (target_id, mid),
                 )
                 await db.execute(
                     "DELETE FROM knowledge_edges WHERE src_id = ? OR dst_id = ?",
-                    (node_id, node_id),
+                    (mid, mid),
                 )
-                await db.execute("DELETE FROM knowledge_nodes WHERE id = ?", (node_id,))
-                if summary:
+                await db.execute("DELETE FROM knowledge_nodes WHERE id = ?", (mid,))
+
+            # Remove self-loops on the canonical node created when an edge linked
+            # two nodes that both got merged into it.
+            await db.execute(
+                "DELETE FROM knowledge_edges WHERE src_id = ? AND dst_id = ?",
+                (target_id, target_id),
+            )
+
+            # Ensure the canonical node carries the new label.
+            await db.execute(
+                "UPDATE knowledge_nodes SET label = ?, updated_at = ? WHERE id = ?",
+                (new_label, _now(), target_id),
+            )
+            # Only set the subject when it cannot collide with another existing
+            # (label, subject) row — otherwise leave the canonical subject as-is.
+            if subject is not None:
+                clash = await db.execute_fetchall(
+                    "SELECT id FROM knowledge_nodes WHERE label = ? AND subject IS ? "
+                    "AND id != ?",
+                    (new_label, subject, target_id),
+                )
+                if not clash:
                     await db.execute(
-                        "UPDATE knowledge_nodes SET summary = ?, updated_at = ? WHERE id = ?",
-                        (summary, _now(), target_id),
-                    )
-                if subject:
-                    await db.execute(
-                        "UPDATE knowledge_nodes SET subject = ?, updated_at = ? WHERE id = ?",
+                        "UPDATE knowledge_nodes SET subject = ?, updated_at = ? "
+                        "WHERE id = ?",
                         (subject, _now(), target_id),
                     )
-            else:
-                updates = ["label = ?", "updated_at = ?"]
-                params: list[Any] = [new_label, _now()]
-                if subject is not None:
-                    updates.append("subject = ?")
-                    params.append(subject)
-                if summary is not None:
-                    updates.append("summary = ?")
-                    params.append(summary)
-                params.append(node_id)
+            if summary:
                 await db.execute(
-                    f"UPDATE knowledge_nodes SET {', '.join(updates)} WHERE id = ?",
-                    params,
+                    "UPDATE knowledge_nodes SET summary = ?, updated_at = ? WHERE id = ?",
+                    (summary, _now(), target_id),
                 )
             await db.commit()
             return True
@@ -419,21 +468,62 @@ class Database:
             await db.commit()
 
     async def rename_skill(self, old_name: str, new_name: str) -> bool:
-        """Rename a skill, preserving all its data. Returns True on success."""
+        """Rename a skill, merging into an existing skill if the target name
+        already exists.
+
+        Because ``skills.name`` is UNIQUE, a plain rename into an existing name
+        would raise an IntegrityError. When the target already exists we instead
+        fold the old skill's data into it: evidence lists are concatenated, the
+        more advanced status and the higher confidence are kept, and the old row
+        is deleted. Returns True on success.
+        """
         old_name = old_name.strip()
         new_name = new_name.strip()
         if not old_name or not new_name or old_name == new_name:
             return False
         async with self._conn() as db:
-            rows = await db.execute_fetchall(
-                "SELECT id FROM skills WHERE name = ?", (old_name,)
+            old_rows = await db.execute_fetchall(
+                "SELECT id, status, confidence, evidence FROM skills WHERE name = ?",
+                (old_name,),
             )
-            if not rows:
+            if not old_rows:
                 return False
-            await db.execute(
-                "UPDATE skills SET name = ?, updated_at = ? WHERE id = ?",
-                (new_name, _now(), rows[0]["id"]),
+            old = old_rows[0]
+            target_rows = await db.execute_fetchall(
+                "SELECT id, status, confidence, evidence FROM skills WHERE name = ?",
+                (new_name,),
             )
+            if target_rows and target_rows[0]["id"] != old["id"]:
+                # Merge the old skill into the existing target, then drop it.
+                target = target_rows[0]
+                old_ev = json.loads(old["evidence"] or "[]")
+                target_ev = json.loads(target["evidence"] or "[]")
+                merged_ev = (target_ev + old_ev)[-8:]
+                status_rank = {"locked": 0, "emerging": 1, "demonstrated": 2}
+                merged_status = (
+                    old["status"]
+                    if status_rank.get(old["status"], 0)
+                    > status_rank.get(target["status"], 0)
+                    else target["status"]
+                )
+                merged_conf = max(old["confidence"], target["confidence"])
+                await db.execute(
+                    "UPDATE skills SET status = ?, confidence = ?, evidence = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (
+                        merged_status,
+                        merged_conf,
+                        json.dumps(merged_ev),
+                        _now(),
+                        target["id"],
+                    ),
+                )
+                await db.execute("DELETE FROM skills WHERE id = ?", (old["id"],))
+            else:
+                await db.execute(
+                    "UPDATE skills SET name = ?, updated_at = ? WHERE id = ?",
+                    (new_name, _now(), old["id"]),
+                )
             await db.commit()
             return True
 
@@ -580,6 +670,61 @@ class Database:
             )
             await db.commit()
             return (cur.rowcount or 0) > 0
+
+    async def rename_concept_progress(self, old_concept: str, new_concept: str) -> int:
+        """Rename concept_progress entries from old_concept to new_concept.
+
+        For each session that has old_concept:
+        - If the session already has new_concept, delete the old_concept row (merge)
+        - Otherwise, update the old_concept row to new_concept
+
+        Returns the number of rows affected (renamed or deleted).
+        """
+        if old_concept == new_concept:
+            return 0
+
+        async with self._conn() as db:
+            # Find all sessions that have the old concept
+            old_rows = await db.execute_fetchall(
+                "SELECT session_id, id FROM concept_progress WHERE concept = ?",
+                (old_concept,),
+            )
+
+            affected = 0
+            for row in old_rows:
+                session_id = row["session_id"]
+                old_id = row["id"]
+
+                # Check if this session already has the new concept
+                existing = await db.execute_fetchall(
+                    "SELECT id FROM concept_progress WHERE session_id = ? AND concept = ?",
+                    (session_id, new_concept),
+                )
+
+                if existing:
+                    # Session already has new_concept - delete the old one (merge)
+                    await db.execute(
+                        "DELETE FROM concept_progress WHERE id = ?",
+                        (old_id,),
+                    )
+                else:
+                    # Rename the old concept to new concept
+                    await db.execute(
+                        "UPDATE concept_progress SET concept = ?, updated_at = ? WHERE id = ?",
+                        (new_concept, _now(), old_id),
+                    )
+                affected += 1
+
+            await db.commit()
+            return affected
+
+    async def list_all_concepts(self) -> list[str]:
+        """Return all unique concept names across all sessions."""
+        async with self._conn() as db:
+            rows = await db.execute_fetchall(
+                "SELECT DISTINCT concept FROM concept_progress ORDER BY concept"
+            )
+            return [r["concept"] for r in rows]
 
     # ------------------------------------------------------------------ #
     # Spaced repetition (SM-2 lite)

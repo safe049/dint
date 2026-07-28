@@ -440,7 +440,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "knowledge_add",
-            "description": "Add or update a concept in your knowledge graph, with optional links.",
+            "description": (
+                "Add or update a concept in your knowledge graph, with optional links. "
+                "IMPORTANT: Before adding, call knowledge_lookup to check if the concept "
+                "already exists under a similar name. Reuse existing names — do NOT create "
+                "near-duplicates (e.g. 'for loop' vs 'for-loop' vs 'for loops')."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -569,8 +574,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "concept_progress",
             "description": (
-                "Track the per-question concept checklist (✓ demonstrated / ○ next). "
-                "Use action='set' to mark a concept, or omit action to list current state."
+                "Track the per-question concept checklist visible to the learner "
+                "(✓ demonstrated / ○ next). This is the whiteboard checklist that "
+                "shows the learner exactly what they've built and what's coming. "
+                "IMPORTANT: Call this with action='set' EVERY TIME the learner "
+                "demonstrates understanding of a concept — do not wait. When you "
+                "start a new topic, seed it with the key concepts as 'next'. "
+                "Use the session_id from your context block. "
+                "Omit action (or use 'list') to see the current checklist state."
             ),
             "parameters": {
                 "type": "object",

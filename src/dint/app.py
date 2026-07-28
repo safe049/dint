@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from . import settings_store
 from .agent import regenerate_stream, respond, respond_stream
+from .consolidation import consolidate, reset_consolidation_probability
 from .db import get_db
 from .llm import reset_client
 
@@ -384,6 +385,18 @@ async def reset_all_data() -> dict[str, Any]:
     db = await get_db()
     counts = await db.clear_all_learner_data()
     return {"status": "reset", "deleted": counts}
+
+
+# --------------------------------------------------------------------------- #
+# Manual consolidation
+# --------------------------------------------------------------------------- #
+@app.post("/api/consolidate")
+async def manual_consolidate() -> dict[str, Any]:
+    """Trigger a manual memory-consolidation pass and reset the probability."""
+    merges = await consolidate()
+    reset_consolidation_probability()
+    total = sum(merges.values())
+    return {"status": "consolidated", "merged": total, "removed": total}
 
 
 # --------------------------------------------------------------------------- #

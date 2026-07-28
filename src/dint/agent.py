@@ -21,12 +21,15 @@ import asyncio
 import json
 from typing import Any, Optional
 
+import re
+
 from . import settings_store
+from .consolidation import maybe_consolidate
 from .db import get_db
 from .llm import chat_completion, chat_completion_stream
 from .persona import build_system_prompt
 from .reflection import reflect
-from .tools import TOOL_SCHEMAS, dispatch
+from .tools import TOOL_HANDLERS, TOOL_SCHEMAS, dispatch
 
 # How many of the most recent stored messages to replay into context. Keeps the
 # prompt bounded on long sessions while preserving recent conversational flow.
@@ -34,12 +37,76 @@ _HISTORY_WINDOW = 40
 
 
 # --------------------------------------------------------------------------- #
+# Inline tool-call extraction
+# --------------------------------------------------------------------------- #
+# Some models occasionally emit tool invocations as JSON objects embedded in
+# their text content instead of using the structured tool_calls field.  We
+# detect these, execute them, and strip them from the visible reply so the
+# learner never sees raw JSON blobs.
+_INLINE_TOOL_RE = re.compile(
+    r"\{[^{}]*?\"name\"\s*:\s*\"(?P<name>[a-z_]+)\"[^{}]*?"
+    r"\"arguments\"\s*:\s*(?P<args>\{[^{}]*\})[^{}]*?\}",
+    re.DOTALL,
+)
+
+
+async def _extract_inline_tool_calls(
+    text: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Find tool-call JSON objects embedded in *text*, execute them, and return
+    the cleaned text plus a list of trace entries ``{name, arguments, result}``.
+
+    Only objects whose ``name`` matches a registered tool handler are treated as
+    tool calls; anything else is left untouched.
+    """
+    traces: list[dict[str, Any]] = []
+    cleaned = text
+
+    # Iterate over matches in reverse so removals don't shift indices.
+    matches = list(_INLINE_TOOL_RE.finditer(text))
+    for m in reversed(matches):
+        name = m.group("name")
+        if name not in TOOL_HANDLERS:
+            continue
+        try:
+            arguments = json.loads(m.group("args"))
+        except json.JSONDecodeError:
+            continue
+        result = await dispatch(name, arguments)
+        traces.append({"name": name, "arguments": arguments, "result": result})
+        # Remove the matched span (and any immediately preceding label like
+        # "[TOOL_CALL]" or "Tool call:") from the visible text.
+        start = m.start()
+        # Walk backwards over an optional label prefix on the same line.
+        prefix_re = re.compile(r"(?:\[[\w ]*\]|[Tt]ool\s*call\s*:?\s*)$")
+        preceding = cleaned[:start]
+        pm = prefix_re.search(preceding)
+        if pm:
+            start = pm.start()
+        cleaned = cleaned[:start] + cleaned[m.end():]
+
+    # Collapse excessive blank lines left behind by removals.
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    # Traces were collected in reverse order; restore chronological order.
+    traces.reverse()
+    return cleaned, traces
+
+
+# --------------------------------------------------------------------------- #
 # Context snapshot
 # --------------------------------------------------------------------------- #
-async def _build_context_block(subject: Optional[str]) -> str:
+async def _build_context_block(
+    subject: Optional[str], session_id: str = ""
+) -> str:
     """Render a compact snapshot of what dint knows about this learner."""
     db = await get_db()
     sections: list[str] = []
+
+    if session_id:
+        sections.append(
+            f"Current session id: {session_id}\n"
+            "(Use this exact value for the session_id parameter of concept_progress.)"
+        )
 
     memories = await db.list_memory(limit=15)
     if memories:
@@ -80,7 +147,13 @@ async def _build_context_block(subject: Optional[str]) -> str:
             "Before diving into new material, open with ONE quick recall question "
             "about the most overdue skill. After the learner answers, call "
             "review_skill with the appropriate quality (0-5). Then proceed to "
-            "the learner's actual request."
+            "the learner's actual request.\n"
+            "Judge quality by what they DEMONSTRATE, not by confidence or a bare "
+            "'yeah I remember' — a vague or wrong answer is low quality even if "
+            "they sound sure. If a skill you recorded as mastered now looks shaky, "
+            "that is exactly what review is for: score it low so the estimate "
+            "downgrades and you circle back. Understanding is dynamic; trust the "
+            "latest behavior over your old notes."
         )
 
     return "\n\n".join(sections)
@@ -122,7 +195,7 @@ async def respond(
     # model call fails partway through.
     await db.add_message(session_id, "user", user_message)
 
-    context_block = await _build_context_block(subject)
+    context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
 
     history_rows = await db.list_messages(session_id, limit=_HISTORY_WINDOW)
@@ -172,6 +245,12 @@ async def respond(
             "I went down a bit of a rabbit hole there. Let me reset — "
             "tell me again what you're trying to understand."
         )
+
+    # Some models embed tool calls as JSON in their text reply instead of using
+    # the structured tool_calls field.  Extract, execute, and strip them so the
+    # learner only sees clean prose.
+    reply_text, inline_traces = await _extract_inline_tool_calls(reply_text)
+    tool_trace.extend(inline_traces)
 
     await db.add_message(
         session_id,
@@ -227,7 +306,7 @@ async def respond_stream(
 
     await db.add_message(session_id, "user", user_message)
 
-    context_block = await _build_context_block(subject)
+    context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
 
     history_rows = await db.list_messages(session_id, limit=_HISTORY_WINDOW)
@@ -253,7 +332,14 @@ async def respond_stream(
 
     asyncio.create_task(_safe_reflect(session_id, messages))
 
-    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace}}
+    # Check consolidation probability synchronously so we can report it.
+    consolidated = False
+    try:
+        consolidated = await maybe_consolidate()
+    except Exception:  # noqa: BLE001 - consolidation is best-effort
+        pass
+
+    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace, "consolidated": consolidated}}
 
 
 async def regenerate_stream(session_id: str, subject: Optional[str] = None):
@@ -267,7 +353,7 @@ async def regenerate_stream(session_id: str, subject: Optional[str] = None):
     db = await get_db()
     cfg = settings_store.effective()
 
-    context_block = await _build_context_block(subject)
+    context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
 
     history_rows = await db.list_messages(session_id, limit=_HISTORY_WINDOW)
@@ -296,7 +382,13 @@ async def regenerate_stream(session_id: str, subject: Optional[str] = None):
 
     asyncio.create_task(_safe_reflect(session_id, messages))
 
-    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace}}
+    consolidated = False
+    try:
+        consolidated = await maybe_consolidate()
+    except Exception:  # noqa: BLE001 - consolidation is best-effort
+        pass
+
+    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace, "consolidated": consolidated}}
 
 
 async def _stream_tool_loop(
@@ -351,6 +443,11 @@ async def _stream_tool_loop(
         # If no tool calls were accumulated, this was the final text reply.
         if not tc_accum:
             reply_text = "".join(content_parts)
+            # Handle tool calls the model embedded in its text content.
+            reply_text, inline_traces = await _extract_inline_tool_calls(reply_text)
+            for trace_entry in inline_traces:
+                tool_trace.append(trace_entry)
+                yield {"event": "tool_call", "data": trace_entry}
             break
 
         # Reconstruct the assistant message with tool calls for the conversation.
@@ -392,7 +489,12 @@ async def _stream_tool_loop(
 
 
 async def _safe_reflect(session_id: str, messages: list[dict[str, Any]]) -> None:
-    """Run reflection, swallowing any error so it can never surface to the user."""
+    """Run reflection in the background.
+
+    Best-effort: any error is swallowed so it can never surface to the user or
+    block the reply.  Consolidation is handled separately in the main flow so
+    the result can be reported to the frontend via the SSE done event.
+    """
     try:
         await reflect(session_id, messages)
     except Exception:  # noqa: BLE001 - reflection is best-effort
