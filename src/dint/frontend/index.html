@@ -10,6 +10,28 @@
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
 <body>
+<!-- Auth screen (host multi-user mode only) -->
+<div id="auth-screen" class="auth-screen hidden">
+  <div class="auth-card">
+    <div class="auth-logo">◼</div>
+    <h1>dint</h1>
+    <div class="auth-tabs">
+      <button id="auth-tab-login" class="auth-tab active" data-i18n="auth_login">Sign in</button>
+      <button id="auth-tab-register" class="auth-tab" data-i18n="auth_register">Register</button>
+    </div>
+    <form id="auth-form" autocomplete="on">
+      <label><span data-i18n="auth_username">Username</span>
+        <input type="text" id="auth-username" autocomplete="username" required>
+      </label>
+      <label><span data-i18n="auth_password">Password</span>
+        <input type="password" id="auth-password" autocomplete="current-password" required>
+      </label>
+      <div id="auth-error" class="auth-error"></div>
+      <button type="submit" id="auth-submit" class="primary-btn" data-i18n="auth_signin">SIGN IN</button>
+    </form>
+  </div>
+</div>
+
 <div id="app">
   <!-- Left panel: sessions -->
   <aside id="sidebar" class="panel">
@@ -30,20 +52,25 @@
 
   <!-- Center panel: chat -->
   <main id="chat-area" class="panel">
-    <div id="messages"></div>
+    <div id="chat-header">
+      <button id="logout-btn" class="ghost-btn hidden" data-i18n="logout">SIGN OUT</button>
+    </div>
+    <div id="chat-body">
+      <div id="messages"></div>
 
-    <!-- Welcome overlay shown when no conversation is loaded -->
-    <div id="welcome" class="hidden">
-      <div class="welcome-card">
-        <div class="welcome-logo">◼</div>
-        <h2>dint</h2>
-        <p data-i18n="welcome_text">A Socratic tutor. I don't hand you answers — I ask the
-        questions that lead you there. Tell me what you want to learn and
-        we'll build a plan together.</p>
-        <div class="welcome-chips">
-          <button class="chip" data-i18n="chip_calculus">Teach me calculus from scratch</button>
-          <button class="chip" data-i18n="chip_recursion">Explain recursion like I'm new to coding</button>
-          <button class="chip" data-i18n="chip_history">Quiz me on world history</button>
+      <!-- Welcome overlay shown when no conversation is loaded -->
+      <div id="welcome" class="hidden">
+        <div class="welcome-card">
+          <div class="welcome-logo">◼</div>
+          <h2>dint</h2>
+          <p data-i18n="welcome_text">A Socratic tutor. I don't hand you answers — I ask the
+          questions that lead you there. Tell me what you want to learn and
+          we'll build a plan together.</p>
+          <div class="welcome-chips">
+            <button class="chip" data-i18n="chip_calculus">Teach me calculus from scratch</button>
+            <button class="chip" data-i18n="chip_recursion">Explain recursion like I'm new to coding</button>
+            <button class="chip" data-i18n="chip_history">Quiz me on world history</button>
+          </div>
         </div>
       </div>
     </div>

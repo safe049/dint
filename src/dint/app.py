@@ -19,13 +19,13 @@ from typing import Any, Optional
 
 import json
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import settings_store
+from . import scope, settings_store, users
 from .agent import regenerate_stream, respond, respond_stream
 from .consolidation import consolidate, reset_consolidation_probability
 from .db import get_db
@@ -36,9 +36,63 @@ app = FastAPI(title="dint", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --------------------------------------------------------------------------- #
+# Per-request user scoping / auth middleware
+# --------------------------------------------------------------------------- #
+# Paths that never require authentication in host mode (login/registration,
+# the mode probe, and static frontend assets).
+_PUBLIC_PREFIXES = ("/api/auth/", "/api/mode", "/assets/", "/i18n.js")
+_PUBLIC_EXACT = {"/", "/index.html", "/app.js", "/style.css", "/favicon.svg", "/favicon.ico"}
+
+
+def _extract_token(request: Request) -> Optional[str]:
+    """Pull the session token from the cookie or an Authorization bearer header."""
+    token = request.cookies.get("dint_session")
+    if token:
+        return token
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return None
+
+
+@app.middleware("http")
+async def _scope_middleware(request: Request, call_next):
+    """Bind every request to a user scope before it reaches the data layer.
+
+    * **local** mode: bind the implicit ``LOCAL_USER`` — no login required.
+    * **host** mode: resolve the session token; public paths pass through
+      unbound, everything else needs a valid session or it gets a 401.
+
+    The ContextVar is reset in ``finally`` so it never leaks between requests.
+    Because ``asyncio.create_task`` copies the current context, the background
+    reflection task spawned inside ``/api/chat`` inherits the correct scope.
+    """
+    path = request.url.path
+    if not scope.is_host_mode():
+        token = scope.set_current_user(scope.LOCAL_USER)
+        try:
+            return await call_next(request)
+        finally:
+            scope.reset_current_user(token)
+
+    # Host mode.
+    is_public = path in _PUBLIC_EXACT or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+    username = users.resolve_session(_extract_token(request))
+    if username is None and not is_public:
+        return JSONResponse(
+            status_code=401, content={"detail": "authentication required"}
+        )
+    token = scope.set_current_user(username)
+    try:
+        return await call_next(request)
+    finally:
+        scope.reset_current_user(token)
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +117,10 @@ class RegenerateRequest(BaseModel):
 class SessionCreate(BaseModel):
     title: Optional[str] = None
     subject: Optional[str] = None
+
+
+class SessionRename(BaseModel):
+    title: str
 
 
 class SettingsUpdate(BaseModel):
@@ -116,6 +174,73 @@ class ProgressUpsert(BaseModel):
 
 class ProgressDelete(BaseModel):
     concept: str
+
+
+class AuthCredentials(BaseModel):
+    username: str
+    password: str
+
+
+# --------------------------------------------------------------------------- #
+# Mode + auth (host multi-user mode)
+# --------------------------------------------------------------------------- #
+def _auth_user_payload() -> dict[str, Any]:
+    """Describe the currently-bound user for the frontend."""
+    host = scope.is_host_mode()
+    user = scope.get_current_user()
+    return {
+        "mode": "host" if host else "local",
+        "host_mode": host,
+        "authenticated": bool(user),
+        "username": user,
+        # Fields the settings UI is allowed to see/edit in this mode.
+        "settings_fields": list(settings_store.visible_fields()),
+    }
+
+
+@app.get("/api/mode")
+async def get_mode() -> dict[str, Any]:
+    """Public probe the frontend uses to decide whether to show a login screen."""
+    return _auth_user_payload()
+
+
+@app.get("/api/auth/me")
+async def auth_me() -> dict[str, Any]:
+    return _auth_user_payload()
+
+
+@app.post("/api/auth/register")
+async def auth_register(body: AuthCredentials, response: Response) -> dict[str, Any]:
+    if not scope.is_host_mode():
+        raise HTTPException(status_code=400, detail="registration is disabled in local mode")
+    try:
+        token = users.register(body.username, body.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response.set_cookie(
+        "dint_session", token, httponly=True, samesite="lax", path="/"
+    )
+    return _auth_user_payload()
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: AuthCredentials, response: Response) -> dict[str, Any]:
+    if not scope.is_host_mode():
+        # Local mode has no accounts — just report the implicit local user.
+        return _auth_user_payload()
+    token = users.login(body.username, body.password)
+    if token is None:
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    response.set_cookie(
+        "dint_session", token, httponly=True, samesite="lax", path="/"
+    )
+    return _auth_user_payload()
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(response: Response) -> dict[str, str]:
+    response.delete_cookie("dint_session", path="/")
+    return {"status": "logged_out"}
 
 
 # --------------------------------------------------------------------------- #
@@ -200,6 +325,18 @@ async def create_session(body: SessionCreate) -> dict[str, str]:
     db = await get_db()
     sid = await db.create_session(body.title, body.subject)
     return {"id": sid}
+
+
+@app.patch("/api/sessions/{session_id}")
+async def rename_session(session_id: str, body: SessionRename) -> dict[str, str]:
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title must not be empty")
+    db = await get_db()
+    ok = await db.rename_session(session_id, title)
+    if not ok:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"status": "renamed"}
 
 
 @app.delete("/api/sessions/{session_id}")

@@ -24,6 +24,7 @@ from typing import Any, AsyncIterator, Optional
 
 import aiosqlite
 
+from . import scope, users
 from .config import get_settings
 
 _SCHEMA = """
@@ -571,6 +572,35 @@ class Database:
             )
             await db.commit()
 
+    async def rename_session(self, session_id: str, title: str) -> bool:
+        """Set a new title for a session. Returns True if the session existed."""
+        async with self._conn() as db:
+            cur = await db.execute(
+                "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
+                (title, _now(), session_id),
+            )
+            await db.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def auto_title_session(self, session_id: str, message: str) -> None:
+        """Derive a title from the first user message if the session is untitled.
+
+        The UPDATE is conditional (``title IS NULL OR title = ''``) so it is
+        atomic and never overwrites a title the user has already set.
+        """
+        title = message.strip().replace("\n", " ")
+        if len(title) > 60:
+            title = title[:57].rstrip() + "…"
+        if not title:
+            return
+        async with self._conn() as db:
+            await db.execute(
+                "UPDATE sessions SET title = ? "
+                "WHERE id = ? AND (title IS NULL OR title = '')",
+                (title, session_id),
+            )
+            await db.commit()
+
     async def delete_session(self, session_id: str) -> None:
         async with self._conn() as db:
             await db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
@@ -813,13 +843,46 @@ class Database:
         return counts
 
 
-_db: Optional[Database] = None
+# One Database instance per storage scope (per user in host mode, a single
+# "local" scope in local mode). Keyed by ``scope.scope_key()`` so the entire
+# data layer is isolated per user by construction.
+_dbs: dict[str, Database] = {}
+_db_locks: dict[str, "asyncio.Lock"] = {}
+
+
+def _resolve_db_path(key: str) -> Path:
+    """Map a scope key to its SQLite file.
+
+    * Local mode (key == ``scope.LOCAL_USER``) keeps the original project-root
+      ``dint.db`` so existing single-user installs are unaffected.
+    * Host mode gives each user their own file under ``users/<name>/dint.db``.
+    """
+    if not scope.is_host_mode() or key == scope.LOCAL_USER:
+        return get_settings().db_path
+    return users.user_db_path(key)
 
 
 async def get_db() -> Database:
-    """Return the shared :class:`Database` instance, initialising it lazily."""
-    global _db
-    if _db is None:
-        _db = Database(get_settings().db_path)
-        await _db.init()
-    return _db
+    """Return the :class:`Database` for the current request's user scope.
+
+    Instances are cached per scope key and initialised lazily under a per-scope
+    lock so concurrent first-use from multiple requests can't double-init.
+    """
+    import asyncio
+
+    key = scope.scope_key()
+    db = _dbs.get(key)
+    if db is not None:
+        return db
+
+    lock = _db_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _db_locks[key] = lock
+    async with lock:
+        db = _dbs.get(key)
+        if db is None:
+            db = Database(_resolve_db_path(key))
+            await db.init()
+            _dbs[key] = db
+        return db

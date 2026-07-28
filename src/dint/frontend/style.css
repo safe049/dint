@@ -134,6 +134,29 @@ html, body {
   background: var(--bg);
 }
 
+#chat-header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 16px 0;
+  flex-shrink: 0;
+}
+#chat-header .ghost-btn {
+  flex: none;
+  padding: 6px 14px;
+  font-size: 10px;
+}
+
+/* Scroll region between the header and the input bar. This is the
+   positioning context for the welcome overlay so the overlay covers only
+   the message area — leaving the header (logout) and input bar usable. */
+#chat-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 #messages {
   flex: 1;
   min-height: 0;
@@ -801,6 +824,21 @@ html, body {
 }
 .session-item:hover .session-del { opacity: 0.6; }
 .session-del:hover { opacity: 1; }
+.session-rename {
+  position: absolute;
+  top: 8px;
+  right: 26px;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0;
+  font-size: 11px;
+  padding: 2px 4px;
+  transition: opacity 0.12s;
+}
+.session-item:hover .session-rename { opacity: 0.6; }
+.session-rename:hover { opacity: 1; }
 .no-sessions {
   padding: 20px 12px;
   color: var(--text-faint);
@@ -1092,4 +1130,104 @@ html, body {
   #app { grid-template-columns: 1fr; }
   #sidebar, #panels { display: none; }
   #messages, #input-bar { padding-left: 16px; padding-right: 16px; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Auth screen (host multi-user mode)                                  */
+/* ------------------------------------------------------------------ */
+.auth-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  padding: 20px;
+}
+.auth-card {
+  width: 380px;
+  max-width: 92vw;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  padding: 36px 32px 32px;
+  text-align: center;
+  animation: msg-in 0.25s ease-out;
+}
+.auth-logo {
+  font-size: 32px;
+  color: var(--white);
+  margin-bottom: 12px;
+}
+.auth-card h1 {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: var(--white);
+  margin-bottom: 24px;
+}
+.auth-tabs {
+  display: flex;
+  border: 1px solid var(--border-light);
+  margin-bottom: 24px;
+}
+.auth-tab {
+  flex: 1;
+  padding: 10px 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.auth-tab:hover { color: var(--text-dim); }
+.auth-tab.active {
+  background: var(--white);
+  color: var(--black);
+}
+#auth-form { text-align: left; }
+#auth-form label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 16px;
+}
+#auth-form input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-light);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font-ui);
+  outline: none;
+  transition: border-color 0.15s;
+}
+#auth-form input:focus { border-color: var(--white); }
+.auth-error {
+  min-height: 18px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  border-left: 3px solid var(--text-dim);
+  padding: 6px 10px;
+}
+.auth-error:empty {
+  display: none;
+}
+#auth-submit {
+  width: 100%;
+  padding: 12px;
 }

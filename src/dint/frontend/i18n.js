@@ -17,6 +17,17 @@
 
 const I18N = {
   en: {
+    /* ---- auth ---- */
+    "auth_login": "Sign in",
+    "auth_register": "Register",
+    "auth_username": "Username",
+    "auth_password": "Password",
+    "auth_signin": "SIGN IN",
+    "auth_create": "CREATE ACCOUNT",
+    "auth_missing": "Enter a username and password.",
+    "auth_failed": "Sign-in failed. Check your credentials.",
+    "logout": "SIGN OUT",
+
     /* ---- sidebar ---- */
     "new_session": "New session",
     "panels": "PANELS",
@@ -24,6 +35,7 @@ const I18N = {
     "no_sessions": "No sessions yet — start one below.",
     "untitled_session": "Untitled session",
     "delete_session": "Delete session",
+    "rename_session": "Rename session",
 
     /* ---- welcome ---- */
     "welcome_text":
@@ -84,6 +96,10 @@ const I18N = {
     "title_edit_skill": "EDIT SKILL",
     "title_add_skill": "ADD SKILL",
     "title_rename_concept": "RENAME CONCEPT",
+    "title_rename_session": "RENAME SESSION",
+    "field_title": "Title",
+    "ph_session_title": "e.g. Calculus — chain rule",
+    "err_title_required": "Title required",
     "field_concept": "Concept",
     "field_status": "Status",
     "field_kind": "Kind",
@@ -156,6 +172,17 @@ const I18N = {
   },
 
   zh: {
+    /* ---- auth ---- */
+    "auth_login": "登录",
+    "auth_register": "注册",
+    "auth_username": "用户名",
+    "auth_password": "密码",
+    "auth_signin": "登录",
+    "auth_create": "创建账户",
+    "auth_missing": "请输入用户名和密码。",
+    "auth_failed": "登录失败，请检查凭据。",
+    "logout": "退出登录",
+
     /* ---- sidebar ---- */
     "new_session": "新建会话",
     "panels": "面板",
@@ -163,6 +190,7 @@ const I18N = {
     "no_sessions": "还没有会话——在下方开始一个吧。",
     "untitled_session": "未命名会话",
     "delete_session": "删除会话",
+    "rename_session": "重命名会话",
 
     /* ---- welcome ---- */
     "welcome_text":
@@ -223,6 +251,10 @@ const I18N = {
     "title_edit_skill": "编辑技能",
     "title_add_skill": "添加技能",
     "title_rename_concept": "重命名概念",
+    "title_rename_session": "重命名会话",
+    "field_title": "标题",
+    "ph_session_title": "例如：微积分 — 链式法则",
+    "err_title_required": "需要标题",
     "field_concept": "概念",
     "field_status": "状态",
     "field_kind": "类型",

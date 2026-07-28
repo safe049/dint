@@ -20,6 +20,7 @@ import json
 import logging
 from typing import Any
 
+from . import scope
 from .db import get_db
 from .llm import simple_completion
 
@@ -27,27 +28,32 @@ logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Probability state (module-level, survives across turns within a process)
+#
+# Keyed per storage scope so that, in host mode, each user's consolidation
+# cycle is independent — one tenant's turns can't push another tenant over the
+# 100% trigger. In local mode there is a single "local" key.
 # --------------------------------------------------------------------------- #
-_consolidation_probability: float = 0.0
+_consolidation_probability: dict[str, float] = {}
 _INCREMENT: float = 0.1  # 10 % per turn
 
 
 def get_consolidation_probability() -> float:
-    """Return the current consolidation probability (0.0 – 1.0+)."""
-    return _consolidation_probability
+    """Return the current consolidation probability (0.0 – 1.0+) for this scope."""
+    return _consolidation_probability.get(scope.scope_key(), 0.0)
 
 
 def reset_consolidation_probability() -> None:
-    """Reset the probability counter to zero."""
-    global _consolidation_probability
-    _consolidation_probability = 0.0
+    """Reset this scope's probability counter to zero."""
+    _consolidation_probability[scope.scope_key()] = 0.0
 
 
 def tick_consolidation_probability() -> float:
-    """Advance the probability by one increment and return the new value."""
-    global _consolidation_probability
-    _consolidation_probability = round(_consolidation_probability + _INCREMENT, 10)
-    return _consolidation_probability
+    """Advance this scope's probability by one increment and return the new value."""
+    key = scope.scope_key()
+    current = _consolidation_probability.get(key, 0.0)
+    new = round(current + _INCREMENT, 10)
+    _consolidation_probability[key] = new
+    return new
 
 
 # --------------------------------------------------------------------------- #

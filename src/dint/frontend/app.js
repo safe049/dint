@@ -16,7 +16,101 @@ const state = {
   sending: false,
   abort: null, // AbortController for the active stream (if any)
   autoScroll: true, // stick to bottom unless the user scrolls up
+  auth: null, // { mode, host_mode, authenticated, username, settings_fields }
+  authMode: "login", // active tab on the auth screen: "login" | "register"
 };
+
+/* ------------------------------------------------------------------ */
+/* Authentication (host multi-user mode)                              */
+/* ------------------------------------------------------------------ */
+
+/* Ask the backend which mode we're in and whether we're logged in.
+ * In local mode there is no login screen; in host mode an
+ * unauthenticated visitor sees the auth card instead of the app. */
+async function bootstrapAuth() {
+  try {
+    state.auth = await api("GET", "/api/mode");
+  } catch (e) {
+    state.auth = { mode: "local", host_mode: false, authenticated: true, settings_fields: [] };
+  }
+  const needsLogin = state.auth.host_mode && !state.auth.authenticated;
+  $("#auth-screen").classList.toggle("hidden", !needsLogin);
+  $("#app").classList.toggle("hidden", needsLogin);
+  // Show the sign-out button only for authenticated host-mode users.
+  const logoutBtn = $("#logout-btn");
+  if (logoutBtn) {
+    logoutBtn.classList.toggle("hidden", !(state.auth.host_mode && state.auth.authenticated));
+  }
+  applySettingsVisibility();
+  return !needsLogin;
+}
+
+/* Hide settings inputs the backend says this user may not see. In host
+ * mode the operator-managed API key / base URL are not exposed. */
+function applySettingsVisibility() {
+  const fields = (state.auth && state.auth.settings_fields) || null;
+  for (const key of SETTING_KEYS) {
+    const el = $("#set-" + key);
+    if (!el) continue;
+    const label = el.closest("label");
+    if (!label) continue;
+    const visible = !fields || fields.includes(key);
+    label.classList.toggle("hidden", !visible);
+  }
+}
+
+function setAuthTab(mode) {
+  state.authMode = mode;
+  $("#auth-tab-login").classList.toggle("active", mode === "login");
+  $("#auth-tab-register").classList.toggle("active", mode === "register");
+  const submit = $("#auth-submit");
+  submit.textContent = mode === "login" ? t("auth_signin") : t("auth_create");
+  const pw = $("#auth-password");
+  if (pw) pw.autocomplete = mode === "login" ? "current-password" : "new-password";
+  $("#auth-error").textContent = "";
+}
+
+async function submitAuth(e) {
+  if (e) e.preventDefault();
+  const username = $("#auth-username").value.trim();
+  const password = $("#auth-password").value;
+  const errEl = $("#auth-error");
+  errEl.textContent = "";
+  if (!username || !password) {
+    errEl.textContent = t("auth_missing");
+    return;
+  }
+  const submit = $("#auth-submit");
+  submit.disabled = true;
+  const endpoint = state.authMode === "login" ? "/api/auth/login" : "/api/auth/register";
+  try {
+    await api("POST", endpoint, { username, password });
+    // Cookie is set by the server; re-probe and enter the app.
+    const ok = await bootstrapAuth();
+    if (ok) {
+      $("#auth-password").value = "";
+      await startApp();
+    } else {
+      errEl.textContent = t("auth_failed");
+    }
+  } catch (err) {
+    errEl.textContent = err.message || t("auth_failed");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function logout() {
+  try {
+    await api("POST", "/api/auth/logout");
+  } catch (_) { /* ignore */ }
+  // Return to the login screen without a full page reload.
+  state.sessionId = null;
+  state.sessions = [];
+  $("#messages").innerHTML = "";
+  await bootstrapAuth();
+  setAuthTab("login");
+}
 
 /* ------------------------------------------------------------------ */
 /* API helpers                                                        */
@@ -124,6 +218,15 @@ function renderSessionList() {
     meta.textContent =
       (s.subject ? s.subject + " · " : "") + fmtDate(s.updated_at);
 
+    const rename = document.createElement("button");
+    rename.className = "session-rename";
+    rename.textContent = "✎";
+    rename.title = t("rename_session");
+    rename.onclick = (ev) => {
+      ev.stopPropagation();
+      openRenameSessionModal(s);
+    };
+
     const del = document.createElement("button");
     del.className = "session-del";
     del.textContent = "✕";
@@ -135,6 +238,7 @@ function renderSessionList() {
 
     item.appendChild(title);
     item.appendChild(meta);
+    item.appendChild(rename);
     item.appendChild(del);
     item.onclick = () => openSession(s.id);
     list.appendChild(item);
@@ -177,6 +281,36 @@ async function deleteSession(id) {
   } catch (e) {
     toast(t("err_delete", { msg: e.message }), "error");
   }
+}
+
+function openRenameSessionModal(session) {
+  openItemModal(
+    t("title_rename_session"),
+    [
+      {
+        name: "title",
+        label: t("field_title"),
+        type: "text",
+        value: session.title || "",
+        placeholder: t("ph_session_title"),
+      },
+    ],
+    async (v) => {
+      const title = v.title.trim();
+      if (!title) {
+        toast(t("err_title_required"), "error");
+        return;
+      }
+      try {
+        await api("PATCH", `/api/sessions/${session.id}`, { title });
+        closeItemModal();
+        await loadSessions();
+        toast(t("toast_renamed"), "success");
+      } catch (e) {
+        toast(t("err_rename", { msg: e.message }), "error");
+      }
+    }
+  );
 }
 
 async function openSession(id) {
@@ -1438,6 +1572,7 @@ const SETTING_KEYS = [
 ];
 
 async function openSettings() {
+  applySettingsVisibility();
   const cfg = await api("GET", "/api/settings");
   for (const key of SETTING_KEYS) {
     const el = $("#set-" + key);
@@ -1618,6 +1753,13 @@ function bindEvents() {
     };
   });
 
+  // Auth screen.
+  $("#auth-tab-login").onclick = () => setAuthTab("login");
+  $("#auth-tab-register").onclick = () => setAuthTab("register");
+  $("#auth-form").addEventListener("submit", submitAuth);
+  const logoutBtn = $("#logout-btn");
+  if (logoutBtn) logoutBtn.onclick = logout;
+
   // Settings.
   $("#settings-btn").onclick = openSettings;
   $("#settings-close").onclick = closeSettings;
@@ -1635,17 +1777,25 @@ function bindEvents() {
   $$("#item-modal .modal-backdrop").forEach((b) => (b.onclick = closeItemModal));
 }
 
-async function init() {
-  // Resolve language and translate static markup before first paint of text.
-  i18n.setLang(i18n.detect());
-  bindEvents();
-  initGraphInteractions();
+/* Load data and render the main app. Called once auth is resolved. */
+async function startApp() {
   await loadSessions();
   if (state.sessions.length) {
     await openSession(state.sessions[0].id);
   } else {
     $("#welcome").classList.remove("hidden");
   }
+}
+
+async function init() {
+  // Resolve language and translate static markup before first paint of text.
+  i18n.setLang(i18n.detect());
+  bindEvents();
+  initGraphInteractions();
+  setAuthTab("login");
+  const authed = await bootstrapAuth();
+  if (!authed) return; // wait for the user to log in / register
+  await startApp();
 }
 
 init();

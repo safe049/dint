@@ -36,3 +36,6 @@ uv.lock
 # Misc
 exported_content.txt
 settings.json
+
+users/
+accounts.json

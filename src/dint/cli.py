@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 import uvicorn
 
+from dint import scope
 from dint.config import get_settings
 
 
@@ -30,12 +32,33 @@ def main() -> None:
         action="store_true",
         help="Disable auto-reload (useful for production)",
     )
+    parser.add_argument(
+        "--multi-user",
+        action="store_true",
+        help=(
+            "Run in host/multi-user mode: each visitor registers an account and "
+            "gets isolated memory, skills and knowledge. Without this flag dint "
+            "runs in single-user local mode (no login)."
+        ),
+    )
     args = parser.parse_args()
+
+    # Enable host mode before anything reads the scope flag. We set it both
+    # in-process AND via an environment variable: uvicorn spawns a separate
+    # worker subprocess (always with reload, and even without it for the
+    # imported app object) that re-imports dint.scope and never re-runs this
+    # function, so the env var is what actually carries the flag across.
+    if args.multi_user:
+        os.environ["DINT_HOST_MODE"] = "1"
+        scope.set_host_mode(True)
+    else:
+        os.environ.pop("DINT_HOST_MODE", None)
 
     # Ensure settings are loaded (validates .env / config early).
     get_settings()
 
-    print(f"→ Starting dint on http://localhost:{args.port}")
+    mode_label = "multi-user (host)" if scope.is_host_mode() else "single-user (local)"
+    print(f"→ Starting dint on http://localhost:{args.port} [{mode_label}]")
     uvicorn.run(
         "dint.app:app",
         host=args.host,

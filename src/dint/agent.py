@@ -24,6 +24,7 @@ from typing import Any, Optional
 import re
 
 from . import settings_store
+from .chatlog import log_chat_turn
 from .consolidation import maybe_consolidate
 from .db import get_db
 from .llm import chat_completion, chat_completion_stream
@@ -195,6 +196,9 @@ async def respond(
     # model call fails partway through.
     await db.add_message(session_id, "user", user_message)
 
+    # Auto-title the session from the first user message (no-op if already titled).
+    await db.auto_title_session(session_id, user_message)
+
     context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
 
@@ -262,6 +266,8 @@ async def respond(
     # Background reflection: update memory / skills / knowledge without blocking.
     asyncio.create_task(_safe_reflect(session_id, messages))
 
+    log_chat_turn(session_id, user_message, reply_text, subject)
+
     return {"reply": reply_text, "tool_calls": tool_trace}
 
 
@@ -306,6 +312,9 @@ async def respond_stream(
 
     await db.add_message(session_id, "user", user_message)
 
+    # Auto-title the session from the first user message (no-op if already titled).
+    await db.auto_title_session(session_id, user_message)
+
     context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
 
@@ -339,6 +348,8 @@ async def respond_stream(
     except Exception:  # noqa: BLE001 - consolidation is best-effort
         pass
 
+    log_chat_turn(session_id, user_message, reply_text, subject)
+
     yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace, "consolidated": consolidated}}
 
 
@@ -362,6 +373,13 @@ async def regenerate_stream(session_id: str, subject: Optional[str] = None):
         # Nothing to re-answer (e.g. empty session).
         yield {"event": "done", "data": {"reply": "", "tool_calls": []}}
         return
+
+    # Grab the last user message for the chatlog entry.
+    _last_user_msg = ""
+    for _row in reversed(history_rows):
+        if _row.get("role") == "user":
+            _last_user_msg = _row.get("content") or ""
+            break
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     messages.extend(replay)
@@ -387,6 +405,8 @@ async def regenerate_stream(session_id: str, subject: Optional[str] = None):
         consolidated = await maybe_consolidate()
     except Exception:  # noqa: BLE001 - consolidation is best-effort
         pass
+
+    log_chat_turn(session_id, _last_user_msg, reply_text, subject)
 
     yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace, "consolidated": consolidated}}
 
