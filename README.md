@@ -29,6 +29,7 @@ dint doesn't transmit knowledge. It builds it in your head, brick by brick,
 while you do the lifting.
 
 ## What a session actually looks like
+
 > **You:** Teach me what a variable is. I've never written code.
 >
 > **dint:** Okay. Sit down. No code today. Not yet.
@@ -54,7 +55,6 @@ while you do the lifting.
 >
 > **dint:** Go rest. You earned the cold coffee. Come back when you're ready.
 
-
 No "Great question!" No code dump. No "Is there anything else I can help you
 with?" Just a teacher, a sticky note, and the quiet satisfaction of watching
 someone's face change when an idea lands.
@@ -74,6 +74,19 @@ learning.
 
 Works with any OpenAI-compatible API — OpenAI, OpenRouter, Groq, Together,
 or a local [Ollama](https://ollama.com) server.
+
+### Multi-user mode
+
+Want to host dint for a classroom, a study group, or your friends?
+
+```bash
+dint --multi-user
+```
+
+Each visitor registers an account and gets a fully isolated learning
+environment — their own memory, skills, knowledge graph, and sessions.
+The operator's API key stays hidden from tenants. Per-user data lives under
+`users/<username>/`.
 
 ## What dint actually does
 
@@ -103,10 +116,10 @@ back tomorrow. Knowledge that isn't revisited decays. dint doesn't let it.
 
 **Knowledge graph**
 
-Every concept gets added to a graph — nodes and edges, how ideas connect.
-"Binary search" links to "sorted array" links to "comparison." The graph
-grows as you learn, and dint uses it to connect new ideas to ones you've
-already built.
+Every concept gets added to an interactive force-directed graph — nodes and
+edges, how ideas connect. Pan, zoom, drag nodes, right-click to rename or
+delete. "Binary search" links to "sorted array" links to "comparison." The
+graph grows as you learn.
 
 </td>
 </tr>
@@ -125,41 +138,53 @@ session so it never re-teaches what you've already demonstrated.
 **Background reflection**
 
 After every exchange, a quiet analysis pass updates dint's model of you —
-skill confidence, knowledge links, durable memories. You don't see it. Like
-a professor updating their gradebook after you leave office hours.
+skill confidence, knowledge links, durable memories. It detects when you
+*claim* to understand but your behavior says otherwise, and corrects its
+own stale beliefs. You don't see any of this.
 
 </td>
 <td>
 
-**Web search**
+**Memory consolidation**
 
-For facts dint genuinely doesn't know or that change over time. Library
-versions, API details, current events. Never as an excuse to fetch an answer
-and hand it to you.
+Every ~10 turns, dint reviews its entire inventory of memories, skills, and
+concepts. Near-duplicates get merged. Stale entries get pruned. The model
+stays compact and honest over months of use. You can also trigger it
+manually from Settings.
+
+</td>
+</tr>
+<tr>
+<td>
+
+**Adaptive teaching**
+
+dint watches *how* you think, not just what you know. It notices you skip
+steps when tracing algorithms. It notices you learn better from analogies
+than formal definitions. It adjusts its approach per learner, per session,
+per concept.
+
+</td>
+<td>
+
+**Multi-user isolation**
+
+Run `dint --multi-user` and every visitor gets their own account, their own
+database, their own learning history. The operator's API key is invisible to
+tenants. PBKDF2 password hashing, session tokens, per-user data directories.
+
+</td>
+<td>
+
+**Bilingual (EN / 中文)**
+
+Full UI localization in English and Chinese. Toggle with one click. The
+teaching persona adapts to whatever language you write in. dint teaches you
+in your language, not its own.
 
 </td>
 </tr>
 </table>
-
-## Architecture
-
-```
-src/dint/
-├── app.py              # FastAPI application + REST + SSE streaming
-├── agent.py            # Tool-calling orchestration loop (blocking + streaming)
-├── llm.py              # OpenAI-compatible client (any provider)
-├── tools.py            # 9 tools: memory, skills, knowledge, search, review
-├── reflection.py       # Post-turn analysis → skills, memory, knowledge graph
-├── persona.py          # The professor. The whole professor.
-├── db.py               # SQLite: knowledge graph, memory, skills, SM-2, sessions
-├── config.py           # Environment / .env configuration
-├── settings_store.py   # Runtime-editable settings (.env + settings.json)
-├── cli.py              # CLI entry point (argparse + uvicorn)
-└── frontend/
-    ├── index.html      # SPA shell
-    ├── style.css       # Monochrome UI
-    └── app.js          # Client logic (SSE streaming, panels, settings)
-```
 
 **The loop:**
 
@@ -186,7 +211,14 @@ You send a message
 ┌─────────────────────────────────────────────┐
 │  Background reflection (async, non-blocking)│
 │  → skill confidence · knowledge edges ·     │
-│    durable memories · SM-2 scheduling       │
+│    durable memories · overclaiming check ·  │
+│    belief correction · SM-2 scheduling      │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  Consolidation check (10% per turn)         │
+│  → merge duplicates · prune stale entries · │
+│    keep the model compact and honest        │
 └─────────────────────────────────────────────┘
 ```
 
@@ -201,13 +233,30 @@ You send a message
 | `DATABASE_URL` | SQLite database path | `dint.db` |
 | `MAX_TOOL_ROUNDS` | Max tool-call rounds per turn | `8` |
 | `WEB_SEARCH_RESULTS` | Results per web search | `5` |
+| `DINT_TEMPERATURE` | Sampling temperature | `0.7` |
 
 All settings are also editable at runtime through the **Settings** panel in
 the web UI. Changes take effect immediately.
 
+In **multi-user mode**, the API key and base URL are operator-owned and
+hidden from tenants. Each user can configure their own model, temperature,
+and behaviour knobs.
+
+## CLI options
+
+```
+dint [--host HOST] [--port PORT] [--no-reload] [--multi-user]
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--host` | Bind address | `0.0.0.0` |
+| `--port` | Port to listen on | `7070` |
+| `--multi-user` | Enable multi-user mode with accounts | *(single-user)* |
+
 ## Requirements
 
-- **Python 3.11+**
+- **Python 3.10+**
 - An OpenAI-compatible API key (OpenAI, OpenRouter, Groq, Ollama, etc.)
 - The model must support **tool / function calling**
 
@@ -220,5 +269,5 @@ You don't learn by being told. You learn by dint of thinking.
 ---
 
 <p align="center">
-  <sub>MIT Licensed · Built with cold coffee and stubbornness</sub>
+  <sub>MIT Licensed</sub>
 </p>
