@@ -1,6 +1,6 @@
 [project]
 name = "dint"
-version = "1.2.0"
+version = "1.2.1"
 description = "A personal AI tutor with long-term memory and tool use."
 readme = "README.md"
 license = "MIT"
