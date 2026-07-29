@@ -290,9 +290,14 @@ def _stem(token: str) -> str:
 
 
 def _tokenize(text: str) -> set[str]:
-    """Lowercase, strip punctuation, split, and lightly stem tokens."""
-    raw = _re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).split()
-    return set(_stem(t) for t in raw)
+    text = text.lower()
+    words = set(_stem(w) for w in _re.findall(r'[a-z0-9]+', text))
+    cjk_chars = _re.findall(r'[\u4e00-\u9fff]', text)
+    cjk = set(cjk_chars)
+    # Character bigrams: "变量概念" → {"变量", "量概", "概念"}
+    for i in range(len(cjk_chars) - 1):
+        cjk.add(cjk_chars[i] + cjk_chars[i + 1])
+    return words | cjk
 
 
 def _jaccard(a: str, b: str) -> float:
