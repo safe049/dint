@@ -245,7 +245,7 @@ and behaviour knobs.
 ## CLI options
 
 ```
-dint [--host HOST] [--port PORT] [--no-reload] [--multi-user]
+dint [--host HOST] [--port PORT] [--multi-user]
 ```
 
 | Flag | Description | Default |
