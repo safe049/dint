@@ -18,6 +18,7 @@ The public entry point is :func:`respond`.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 from typing import Any, Optional
 
@@ -32,66 +33,194 @@ from .persona import build_system_prompt
 from .reflection import reflect
 from .tools import TOOL_HANDLERS, TOOL_SCHEMAS, dispatch
 
-# How many of the most recent stored messages to replay into context. Keeps the
-# prompt bounded on long sessions while preserving recent conversational flow.
-_HISTORY_WINDOW = 40
-
 
 # --------------------------------------------------------------------------- #
 # Inline tool-call extraction
 # --------------------------------------------------------------------------- #
-# Some models occasionally emit tool invocations as JSON objects embedded in
-# their text content instead of using the structured tool_calls field.  We
-# detect these, execute them, and strip them from the visible reply so the
-# learner never sees raw JSON blobs.
-_INLINE_TOOL_RE = re.compile(
-    r"\{[^{}]*?\"name\"\s*:\s*\"(?P<name>[a-z_]+)\"[^{}]*?"
-    r"\"arguments\"\s*:\s*(?P<args>\{[^{}]*\})[^{}]*?\}",
+
+# 放宽：fence 后的换行改为可选，适配 ```json{"tool_calls":...}``` 无换行的情况
+_FENCED_BLOCK_RE = re.compile(
+    r"```(?:json)?\s*([\s\S]*?)```",
+    re.DOTALL,
+)
+
+_BARE_TOOL_CALLS_RE = re.compile(
+    r'\{[^{}]*?"tool_calls"\s*:\s*\[.*?\]\s*\}',
+    re.DOTALL,
+)
+
+_SHORTHAND_RE = re.compile(
+    r'\{\s*"name"\s*:\s*"(?P<name>[a-z_]+)"\s*,\s*"arguments"\s*:\s*(?P<args>\{[^{}]*\}|"[^"]*")\s*\}',
+    re.DOTALL,
+)
+
+# 兜底：文本里残留 "tool_calls" 关键字时，尝试最外层 { ... } 提取
+_RESIDUAL_RE = re.compile(
+    r'\{[^{}]*"tool_calls"\s*:\s*\[[\s\S]*?\]\s*\}',
     re.DOTALL,
 )
 
 
+def _parse_arguments(raw: Any) -> dict[str, Any]:
+    """Normalise the arguments field: may be a dict, a JSON string, or None."""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
+
+
+def _extract_calls_from_data(data: Any) -> list[dict[str, Any]]:
+    """Pull a list of {name, arguments} dicts from a parsed JSON structure."""
+    calls: list[dict[str, Any]] = []
+    if isinstance(data, dict) and "tool_calls" in data:
+        raw_list = data["tool_calls"]
+    elif isinstance(data, list):
+        raw_list = data
+    elif isinstance(data, dict) and "name" in data:
+        raw_list = [data]
+    else:
+        return []
+    if not isinstance(raw_list, list):
+        return []
+    for entry in raw_list:
+        if not isinstance(entry, dict):
+            continue
+        fn = entry.get("function", entry)
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name", "")
+        if not name or name not in TOOL_HANDLERS:
+            continue
+        arguments = _parse_arguments(fn.get("arguments"))
+        calls.append({"name": name, "arguments": arguments})
+    return calls
+
+
+_LABEL_RE = re.compile(r"(?:\[[\w ]*\]|[Tt]ool\s*call\s*:?\s*)$")
+
+
 async def _extract_inline_tool_calls(
     text: str,
+    max_calls: int | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Find tool-call JSON objects embedded in *text*, execute them, and return
-    the cleaned text plus a list of trace entries ``{name, arguments, result}``.
-
-    Only objects whose ``name`` matches a registered tool handler are treated as
-    tool calls; anything else is left untouched.
-    """
     traces: list[dict[str, Any]] = []
     cleaned = text
+    dispatched = 0
 
-    # Iterate over matches in reverse so removals don't shift indices.
-    matches = list(_INLINE_TOOL_RE.finditer(text))
-    for m in reversed(matches):
+    def _budget_left() -> int:
+        if max_calls is None:
+            return 999999
+        return max(0, max_calls - dispatched)
+
+    # ── Pass 1: fenced code blocks ──
+    for m in reversed(list(_FENCED_BLOCK_RE.finditer(cleaned))):
+        if _budget_left() <= 0:
+            break
+        body = m.group(1).strip()
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        calls = _extract_calls_from_data(data)
+        if not calls:
+            continue
+        calls = calls[: _budget_left()]          # ← 截断
+        for call in calls:
+            result = await dispatch(call["name"], call["arguments"])
+            traces.append(
+                {"name": call["name"], "arguments": call["arguments"], "result": result}
+            )
+            dispatched += 1
+        start = m.start()
+        lm = _LABEL_RE.search(cleaned[:start])
+        if lm:
+            start = lm.start()
+        cleaned = cleaned[:start] + cleaned[m.end():]
+
+    # ── Pass 2: bare {"tool_calls": [...]} ──
+    for m in reversed(list(_BARE_TOOL_CALLS_RE.finditer(cleaned))):
+        if _budget_left() <= 0:
+            break
+        candidate = m.group(0)
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        calls = _extract_calls_from_data(data)
+        if not calls:
+            continue
+        calls = calls[: _budget_left()]          # ← 截断
+        for call in calls:
+            result = await dispatch(call["name"], call["arguments"])
+            traces.append(
+                {"name": call["name"], "arguments": call["arguments"], "result": result}
+            )
+            dispatched += 1
+        start = m.start()
+        lm = _LABEL_RE.search(cleaned[:start])
+        if lm:
+            start = lm.start()
+        cleaned = cleaned[:start] + cleaned[m.end():]
+
+    # ── Pass 3: shorthand ──
+    for m in reversed(list(_SHORTHAND_RE.finditer(cleaned))):
+        if _budget_left() <= 0:
+            break
         name = m.group("name")
         if name not in TOOL_HANDLERS:
             continue
+        raw_args = m.group("args")
+        if raw_args.startswith('"'):
+            try:
+                raw_args = json.loads(raw_args)
+            except (json.JSONDecodeError, ValueError):
+                continue
         try:
-            arguments = json.loads(m.group("args"))
-        except json.JSONDecodeError:
+            arguments = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(arguments, dict):
             continue
         result = await dispatch(name, arguments)
         traces.append({"name": name, "arguments": arguments, "result": result})
-        # Remove the matched span (and any immediately preceding label like
-        # "[TOOL_CALL]" or "Tool call:") from the visible text.
+        dispatched += 1
         start = m.start()
-        # Walk backwards over an optional label prefix on the same line.
-        prefix_re = re.compile(r"(?:\[[\w ]*\]|[Tt]ool\s*call\s*:?\s*)$")
-        preceding = cleaned[:start]
-        pm = prefix_re.search(preceding)
-        if pm:
-            start = pm.start()
+        lm = _LABEL_RE.search(cleaned[:start])
+        if lm:
+            start = lm.start()
         cleaned = cleaned[:start] + cleaned[m.end():]
 
-    # Collapse excessive blank lines left behind by removals.
+    # ── Pass 4: 兜底 ──
+    if '"tool_calls"' in cleaned and _budget_left() > 0:
+        for m in reversed(list(_RESIDUAL_RE.finditer(cleaned))):
+            if _budget_left() <= 0:
+                break
+            try:
+                data = json.loads(m.group(0))
+            except (json.JSONDecodeError, ValueError):
+                continue
+            calls = _extract_calls_from_data(data)
+            if not calls:
+                continue
+            calls = calls[: _budget_left()]
+            for call in calls:
+                result = await dispatch(call["name"], call["arguments"])
+                traces.append(
+                    {"name": call["name"], "arguments": call["arguments"], "result": result}
+                )
+                dispatched += 1
+            cleaned = cleaned[:m.start()] + cleaned[m.end():]
+
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    # Traces were collected in reverse order; restore chronological order.
     traces.reverse()
     return cleaned, traces
-
 
 # --------------------------------------------------------------------------- #
 # Context snapshot
@@ -99,7 +228,17 @@ async def _extract_inline_tool_calls(
 async def _build_context_block(
     subject: Optional[str], session_id: str = ""
 ) -> str:
-    """Render a compact snapshot of what dint knows about this learner."""
+    """Render a *lightweight* index of what dint knows about this learner.
+
+    Historically this dumped the full memory / skill / knowledge contents into
+    the system prompt on every turn, which bloated each API call. Now it only
+    injects a tiny index — counts plus any time-sensitive review-due items — and
+    leaves the full details to be fetched on demand via the dedicated search
+    tools (``recall_memory``, ``skill_report``, ``knowledge_lookup`` and
+    ``concept_progress``), each of which filters by a query rather than dumping
+    everything. The model decides when it actually needs to look at its notes, so
+    a simple "hi" no longer pays for a full context dump.
+    """
     db = await get_db()
     sections: list[str] = []
 
@@ -109,36 +248,46 @@ async def _build_context_block(
             "(Use this exact value for the session_id parameter of concept_progress.)"
         )
 
-    memories = await db.list_memory(limit=15)
-    if memories:
-        lines = [f"- [{m['kind']}] {m['content']}" for m in memories]
-        sections.append("Long-term memory:\n" + "\n".join(lines))
-
-    skills = await db.list_skills(limit=20)
-    if skills:
-        lines = [
-            f"- {s['name']} ({s['domain'] or 'general'}): {s['status']}, "
-            f"confidence {s['confidence']:.2f}"
-            for s in skills
-        ]
-        sections.append("Skill estimates:\n" + "\n".join(lines))
-
-    # Pull knowledge relevant to the current subject if we have one, otherwise a
-    # small recent slice so dint can connect ideas.
+    # Cheap counts only — enough for the model to know WHETHER it has notes worth
+    # inspecting, without paying to embed all of them every turn.
+    memories = await db.list_memory(limit=1)
+    skills = await db.list_skills(limit=1)
     if subject:
-        knowledge = await db.search_knowledge(subject, limit=12)
+        knowledge = await db.search_knowledge(subject, limit=1)
     else:
-        sub = await db.knowledge_subgraph(limit=12)
+        sub = await db.knowledge_subgraph(limit=1)
         knowledge = sub["nodes"]
-    if knowledge:
-        lines = [
-            f"- {k['label']} ({k.get('subject') or 'general'}): "
-            f"{k.get('summary') or 'no summary'}"
-            for k in knowledge
-        ]
-        sections.append("Known concepts:\n" + "\n".join(lines))
 
-    # Spaced-repetition: check for skills due for review.
+    index_bits: list[str] = []
+    if memories:
+        index_bits.append("long-term memory")
+    if skills:
+        index_bits.append("skill estimates")
+    if knowledge:
+        index_bits.append("known concepts")
+
+    if index_bits:
+        sections.append(
+            "Your notes on this learner are NOT loaded into this prompt. You have "
+            "recorded: " + ", ".join(index_bits) + ". "
+            "When you need the details — at the start of a topic, or before deciding "
+            "what to teach next — SEARCH for them with the dedicated tools rather "
+            "than guessing: recall_memory(query=...) for memory, skill_report(query=...) "
+            "for skills, knowledge_lookup(query=...) for concepts, and "
+            "concept_progress(session_id, query=...) for this session's checklist. "
+            "Each tool filters to matching entries — pass a focused query (e.g. the "
+            "topic at hand"
+            + (f", such as '{subject}'" if subject else "")
+            + ") instead of dumping everything. Don't guess at what you recorded; look."
+        )
+    else:
+        sections.append(
+            "You have no notes on this learner yet. As you teach, use remember / "
+            "skill_update / knowledge_add to build them up for next time."
+        )
+
+    # Spaced-repetition review-due is time-sensitive and actionable, so it stays
+    # in the prompt (kept compact). Everything else is fetched on demand.
     due = await db.skills_due_for_review(limit=3)
     if due:
         names = ", ".join(s["name"] for s in due)
@@ -157,6 +306,7 @@ async def _build_context_block(
             "latest behavior over your old notes."
         )
 
+    sections.append(f"Current time: {datetime.datetime.now().strftime('%A %H:%M')}")
     return "\n\n".join(sections)
 
 
@@ -192,9 +342,19 @@ async def respond(
     db = await get_db()
     cfg = settings_store.effective()
 
-    # Persist the learner's message first so it's part of history even if the
-    # model call fails partway through.
-    await db.add_message(session_id, "user", user_message)
+    # ── Dedup: skip writing the user message if the last stored row is
+    #    already an identical user turn (e.g. a retried/double-submitted
+    #    request after a stream error). Prevents duplicate rows from
+    #    polluting the replayed context on subsequent turns. ────────────
+    history_rows = await db.list_messages(session_id)
+    is_dup = (
+        history_rows
+        and history_rows[-1]["role"] == "user"
+        and (history_rows[-1]["content"] or "").strip() == user_message.strip()
+    )
+    if not is_dup:
+        await db.add_message(session_id, "user", user_message)
+        history_rows = await db.list_messages(session_id)
 
     # Auto-title the session from the first user message (no-op if already titled).
     await db.auto_title_session(session_id, user_message)
@@ -202,11 +362,9 @@ async def respond(
     context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
 
-    history_rows = await db.list_messages(session_id, limit=_HISTORY_WINDOW)
-    # The just-added user message is the last row; drop it from the replay set
-    # because we append it explicitly below (avoids a duplicate).
+    # The user message is the last row; drop it from the replay set because we
+    # append it explicitly below (avoids a duplicate in the prompt).
     replay = _stored_to_openai(history_rows[:-1])
-
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     messages.extend(replay)
     messages.append({"role": "user", "content": user_message})
@@ -214,47 +372,107 @@ async def respond(
     tool_trace: list[dict[str, Any]] = []
     reply_text = ""
 
+    # Per-turn tool budget. ``max_tool_rounds`` caps loop *iterations*; this
+    # caps the *total number of individual tool calls* across all iterations,
+    # so one turn can't fire 6 calls × 8 rounds = 48 operations.
+    tool_budget = int(cfg.get("max_tool_calls_per_turn", 4))
+    tool_calls_dispatched = 0
+
     for _ in range(int(cfg["max_tool_rounds"])):
-        resp = await chat_completion(messages, tools=TOOL_SCHEMAS)
+        # Over budget → call without tools so the model is forced to emit a
+        # final text reply instead of more tool invocations.
+        over_budget = tool_calls_dispatched >= tool_budget
+        resp = await chat_completion(
+            messages, tools=None if over_budget else TOOL_SCHEMAS
+        )
         msg = resp.choices[0].message
 
-        if not msg.tool_calls:
-            reply_text = msg.content or ""
-            break
+        # ── Structured tool_calls path ─────────────────────────────────
+        if msg.tool_calls:
+            # Append the assistant's tool-calling message verbatim so the
+            # follow-up tool results line up with their calls.
+            messages.append(_assistant_message(msg))
+            for call in msg.tool_calls:
+                name = call.function.name
+                try:
+                    arguments = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    arguments = {}
+                result = await dispatch(name, arguments)
+                tool_trace.append(
+                    {"name": name, "arguments": arguments, "result": result}
+                )
+                tool_calls_dispatched += 1
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": result,
+                    }
+                )
+            continue
 
-        # Append the assistant's tool-calling message verbatim so the follow-up
-        # tool results line up with their calls.
-        messages.append(_assistant_message(msg))
+        # ── No structured tool_calls: check for inline (JSON-in-text) ──
+        reply_text = msg.content or ""
+        remaining = max(0, tool_budget - tool_calls_dispatched)
+        reply_text, inline_traces = await _extract_inline_tool_calls(
+            reply_text, max_calls=remaining
+        )
 
-        for call in msg.tool_calls:
-            name = call.function.name
-            try:
-                arguments = json.loads(call.function.arguments or "{}")
-            except json.JSONDecodeError:
-                arguments = {}
-            result = await dispatch(name, arguments)
-            tool_trace.append(
-                {"name": name, "arguments": arguments, "result": result}
-            )
+        if inline_traces:
+            # Feed the inline results back to the model (mirrors the
+            # structured path) so it can react to them, then loop again.
+            tool_trace.extend(inline_traces)
+            tool_calls_dispatched += len(inline_traces)
+
+            fake_tool_calls = []
+            for i, trace in enumerate(inline_traces):
+                tc_id = f"inline_{i}_{id(trace)}"
+                fake_tool_calls.append(
+                    {
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": trace["name"],
+                            "arguments": json.dumps(
+                                trace["arguments"], ensure_ascii=False
+                            ),
+                        },
+                    }
+                )
             messages.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": result,
+                    "role": "assistant",
+                    "content": reply_text,
+                    "tool_calls": fake_tool_calls,
                 }
             )
+            for i, trace in enumerate(inline_traces):
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": fake_tool_calls[i]["id"],
+                        "content": trace["result"],
+                    }
+                )
+            continue  # model sees the results, generates the final reply
+
+        # No inline calls either → this is the genuine final reply.
+        break
+
     else:
-        # Exhausted the tool budget without a final answer.
         reply_text = (
             "I went down a bit of a rabbit hole there. Let me reset — "
             "tell me again what you're trying to understand."
         )
 
-    # Some models embed tool calls as JSON in their text reply instead of using
-    # the structured tool_calls field.  Extract, execute, and strip them so the
-    # learner only sees clean prose.
-    reply_text, inline_traces = await _extract_inline_tool_calls(reply_text)
-    tool_trace.extend(inline_traces)
+    # ── 空回复兜底（非流式）──────────────────────────────────────────
+    if not reply_text.strip():
+        resp = await chat_completion(messages, tools=None)
+        reply_text = resp.choices[0].message.content or ""
+
+    if not reply_text.strip():
+        reply_text = "…"
 
     await db.add_message(
         session_id,
@@ -265,9 +483,7 @@ async def respond(
 
     # Background reflection: update memory / skills / knowledge without blocking.
     asyncio.create_task(_safe_reflect(session_id, messages))
-
     log_chat_turn(session_id, user_message, reply_text, subject)
-
     return {"reply": reply_text, "tool_calls": tool_trace}
 
 
@@ -290,37 +506,32 @@ def _assistant_message(msg: Any) -> dict[str, Any]:
         "tool_calls": tool_calls,
     }
 
-
 async def respond_stream(
     session_id: str,
     user_message: str,
     subject: Optional[str] = None,
 ):
-    """Streaming variant of :func:`respond`.
-
-    Yields dicts suitable for SSE serialisation:
-
-    * ``{"event": "token", "data": "..."}`` – a text fragment of the reply
-    * ``{"event": "tool_call", "data": {...}}`` – a completed tool call trace
-    * ``{"event": "done", "data": {"reply": "...", "tool_calls": [...]}}``
-
-    The full reply and tool trace are persisted to the DB exactly as in the
-    non-streaming path.
-    """
+    """Streaming variant of :func:`respond`."""
     db = await get_db()
     cfg = settings_store.effective()
 
-    await db.add_message(session_id, "user", user_message)
+    # ── 去重 ───────────────────────────────────────────────────────────
+    history_rows = await db.list_messages(session_id)
+    is_dup = (
+        history_rows
+        and history_rows[-1]["role"] == "user"
+        and (history_rows[-1]["content"] or "").strip() == user_message.strip()
+    )
+    if not is_dup:
+        await db.add_message(session_id, "user", user_message)
+        history_rows = await db.list_messages(session_id)
 
-    # Auto-title the session from the first user message (no-op if already titled).
     await db.auto_title_session(session_id, user_message)
 
     context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
 
-    history_rows = await db.list_messages(session_id, limit=_HISTORY_WINDOW)
     replay = _stored_to_openai(history_rows[:-1])
-
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     messages.extend(replay)
     messages.append({"role": "user", "content": user_message})
@@ -339,23 +550,22 @@ async def respond_stream(
         meta={"tool_calls": tool_trace} if tool_trace else None,
     )
 
+    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace}}
+
     asyncio.create_task(_safe_reflect(session_id, messages))
 
-    # Check consolidation probability synchronously so we can report it.
-    consolidated = False
-    try:
-        consolidated = await maybe_consolidate()
-    except Exception:  # noqa: BLE001 - consolidation is best-effort
-        pass
+    async def _background_consolidate_and_log():
+        try:
+            await maybe_consolidate()
+        except Exception:  # noqa: BLE001
+            pass
+        log_chat_turn(session_id, user_message, reply_text, subject)
 
-    log_chat_turn(session_id, user_message, reply_text, subject)
-
-    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace, "consolidated": consolidated}}
+    asyncio.create_task(_background_consolidate_and_log())
 
 
 async def regenerate_stream(session_id: str, subject: Optional[str] = None):
     """Regenerate dint's most recent reply (the manual "retry" flow).
-
     The caller must have already removed the previous assistant message from the
     DB. This replays the stored history — which now ends with the learner's
     message — and streams a fresh reply, persisting it exactly like a normal turn.
@@ -363,34 +573,27 @@ async def regenerate_stream(session_id: str, subject: Optional[str] = None):
     """
     db = await get_db()
     cfg = settings_store.effective()
-
     context_block = await _build_context_block(subject, session_id)
     system_prompt = build_system_prompt(context_block)
-
-    history_rows = await db.list_messages(session_id, limit=_HISTORY_WINDOW)
+    history_rows = await db.list_messages(session_id)
     replay = _stored_to_openai(history_rows)
     if not replay:
         # Nothing to re-answer (e.g. empty session).
         yield {"event": "done", "data": {"reply": "", "tool_calls": []}}
         return
-
     # Grab the last user message for the chatlog entry.
     _last_user_msg = ""
     for _row in reversed(history_rows):
         if _row.get("role") == "user":
             _last_user_msg = _row.get("content") or ""
             break
-
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     messages.extend(replay)
-
     out: dict[str, Any] = {}
     async for ev in _stream_tool_loop(messages, cfg, out):
         yield ev
-
     reply_text = out["reply_text"]
     tool_trace = out["tool_trace"]
-
     await db.add_message(
         session_id,
         "assistant",
@@ -398,17 +601,19 @@ async def regenerate_stream(session_id: str, subject: Optional[str] = None):
         meta={"tool_calls": tool_trace} if tool_trace else None,
     )
 
+    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace}}
+    
+    # Schedule background tasks after stream is complete
     asyncio.create_task(_safe_reflect(session_id, messages))
-
-    consolidated = False
-    try:
-        consolidated = await maybe_consolidate()
-    except Exception:  # noqa: BLE001 - consolidation is best-effort
-        pass
-
-    log_chat_turn(session_id, _last_user_msg, reply_text, subject)
-
-    yield {"event": "done", "data": {"reply": reply_text, "tool_calls": tool_trace, "consolidated": consolidated}}
+    
+    async def _background_consolidate_and_log():
+        try:
+            await maybe_consolidate()
+        except Exception:  # noqa: BLE001 - consolidation is best-effort
+            pass
+        log_chat_turn(session_id, _last_user_msg, reply_text, subject)
+    
+    asyncio.create_task(_background_consolidate_and_log())
 
 
 async def _stream_tool_loop(
@@ -416,32 +621,26 @@ async def _stream_tool_loop(
     cfg: dict[str, Any],
     out: dict[str, Any],
 ):
-    """Shared streaming tool-calling loop used by both reply and retry paths.
-
-    Mutates ``messages`` in place (appending assistant/tool turns) and yields SSE
-    event dicts (``token`` / ``tool_call``). On completion, stores ``reply_text``
-    and ``tool_trace`` in ``out``.
-    """
     tool_trace: list[dict[str, Any]] = []
     reply_text = ""
+    tool_budget = int(cfg.get("max_tool_calls_per_turn", 4))
+    tool_calls_dispatched = 0
 
     for _ in range(int(cfg["max_tool_rounds"])):
-        # Accumulate streamed deltas for this round.
         content_parts: list[str] = []
-        # tool_calls arrive as fragments keyed by index
         tc_accum: dict[int, dict[str, Any]] = {}
 
-        async for chunk in chat_completion_stream(messages, tools=TOOL_SCHEMAS):
+        # 超预算 → 不传 tools，强制纯文本回复
+        over_budget = tool_calls_dispatched >= tool_budget
+        async for chunk in chat_completion_stream(
+            messages, tools=None if over_budget else TOOL_SCHEMAS
+        ):
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
                 continue
-
-            # Text content tokens
             if delta.content:
                 content_parts.append(delta.content)
                 yield {"event": "token", "data": delta.content}
-
-            # Tool-call fragments
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     idx = tc_delta.index
@@ -460,17 +659,20 @@ async def _stream_tool_loop(
                         if tc_delta.function.arguments:
                             acc["function"]["arguments"] += tc_delta.function.arguments
 
-        # If no tool calls were accumulated, this was the final text reply.
         if not tc_accum:
             reply_text = "".join(content_parts)
-            # Handle tool calls the model embedded in its text content.
-            reply_text, inline_traces = await _extract_inline_tool_calls(reply_text)
+            remaining = max(0, tool_budget - tool_calls_dispatched)
+            reply_text, inline_traces = await _extract_inline_tool_calls(
+                reply_text, max_calls=remaining
+            )
+            tool_calls_dispatched += len(inline_traces)
             for trace_entry in inline_traces:
                 tool_trace.append(trace_entry)
                 yield {"event": "tool_call", "data": trace_entry}
             break
 
-        # Reconstruct the assistant message with tool calls for the conversation.
+        # 结构化 tool_calls：本轮全部派发（模型已经吐出来了，不能吞），
+        # 但计入预算，下一轮会被截断
         tool_calls_list = [tc_accum[i] for i in sorted(tc_accum)]
         messages.append(
             {
@@ -479,8 +681,6 @@ async def _stream_tool_loop(
                 "tool_calls": tool_calls_list,
             }
         )
-
-        # Dispatch each tool call and stream the trace events.
         for tc in tool_calls_list:
             name = tc["function"]["name"]
             try:
@@ -490,13 +690,10 @@ async def _stream_tool_loop(
             result = await dispatch(name, arguments)
             trace_entry = {"name": name, "arguments": arguments, "result": result}
             tool_trace.append(trace_entry)
+            tool_calls_dispatched += 1
             yield {"event": "tool_call", "data": trace_entry}
             messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                }
+                {"role": "tool", "tool_call_id": tc["id"], "content": result}
             )
     else:
         reply_text = (
@@ -504,9 +701,26 @@ async def _stream_tool_loop(
             "tell me again what you're trying to understand."
         )
 
+    # ── 空回复兜底 ─────────────────────────────────────────────────────
+    # 模型可能把所有轮次都花在工具调用上，从没产出最终文本；或者它的
+    # "回复"整段就是被提取剥掉的内联 tool-call JSON，什么都不剩。
+    # 两种情况用户都会看到空气泡。强制一次无 tools 的补全，此时 messages
+    # 末尾是工具结果，模型只需要总结——总能挤出文本。
+    if not reply_text.strip():
+        final_parts: list[str] = []
+        async for chunk in chat_completion_stream(messages, tools=None):
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                final_parts.append(delta.content)
+                yield {"event": "token", "data": delta.content}
+        reply_text = "".join(final_parts)
+
+    # 最后一道保险：强制补全也空了（provider 彻底摆烂）。
+    if not reply_text.strip():
+        reply_text = "…"
+
     out["reply_text"] = reply_text
     out["tool_trace"] = tool_trace
-
 
 async def _safe_reflect(session_id: str, messages: list[dict[str, Any]]) -> None:
     """Run reflection in the background.

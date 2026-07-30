@@ -12,6 +12,11 @@ Tools fall into two groups:
 * **Web search** – a best-effort, dependency-light web search. It tries, in
   order: a configured Brave/Serper-style key, then DuckDuckGo HTML, and finally
   falls back to a clear "search unavailable" message so teaching is never blocked.
+
+Batch support: write/update/delete tools accept an optional ``items`` (or
+``ids`` / ``names`` / ``labels`` / ``concepts``) array so the model can combine
+multiple operations into a single tool call, reducing API round-trips.  The
+original single-item parameters are kept for backward compatibility.
 """
 from __future__ import annotations
 
@@ -23,6 +28,18 @@ from .config import get_settings
 from .db import get_db
 
 Handler = Callable[[dict[str, Any]], Awaitable[str]]
+
+
+def _matches(query: str, *fields: Any) -> bool:
+    """Case-insensitive substring match of ``query`` against any of ``fields``.
+
+    An empty query matches everything, so callers can treat it as an optional
+    filter without extra branching.
+    """
+    q = query.strip().lower()
+    if not q:
+        return True
+    return any(q in str(f).lower() for f in fields if f is not None)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,45 +143,107 @@ async def web_search(args: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 async def recall_memory(args: dict[str, Any]) -> str:
     db = await get_db()
-    rows = await db.list_memory(limit=int(args.get("limit", 25)))
+    query = (args.get("query") or "").strip()
+    rows = await db.list_memory(limit=int(args.get("limit", 50)))
+    if query:
+        rows = [r for r in rows if _matches(query, r["kind"], r["content"])]
     if not rows:
+        if query:
+            return f"No long-term memories match {query!r}."
         return "No long-term memories recorded yet about this learner."
-    lines = ["Long-term memory (most recent first):"]
+    header = (
+        f"Long-term memory matching {query!r}:"
+        if query
+        else "Long-term memory (most recent first):"
+    )
+    lines = [header]
     for r in rows:
         lines.append(f"- [{r['kind']}] {r['content']}")
     return "\n".join(lines)
 
 
 async def remember(args: dict[str, Any]) -> str:
-    kind = (args.get("kind") or "note").strip()
-    content = (args.get("content") or "").strip()
-    if not content:
-        return "remember: missing 'content'."
+    """Store one or more facts in long-term memory.
+
+    Accepts either the legacy single-item form (``kind`` + ``content``) or a
+    batch ``items`` array of ``{kind, content}`` objects.
+    """
     db = await get_db()
-    await db.add_memory(kind, content)
-    return f"Stored to long-term memory ({kind}): {content}"
+    items: list[dict[str, Any]] = args.get("items") or []
+    if not items:
+        # Backward-compatible single-item path.
+        content = (args.get("content") or "").strip()
+        if not content:
+            return "remember: missing 'content' (or provide 'items' array)."
+        items = [{"kind": args.get("kind") or "note", "content": content}]
+
+    results: list[str] = []
+    for item in items:
+        kind = (item.get("kind") or "note").strip()
+        content = (item.get("content") or "").strip()
+        if not content:
+            results.append("remember: skipped item with empty 'content'.")
+            continue
+        await db.add_memory(kind, content)
+        results.append(f"Stored ({kind}): {content}")
+    return "remember: " + " | ".join(results)
 
 
 async def memory_delete(args: dict[str, Any]) -> str:
-    memory_id = (args.get("id") or "").strip()
-    if not memory_id:
-        return "memory_delete: missing 'id'."
+    """Delete one or more memory entries by id.
+
+    Accepts a single ``id`` or a batch ``ids`` array.
+    """
     db = await get_db()
-    await db.delete_memory(memory_id)
-    return f"Deleted memory entry {memory_id}."
+    ids: list[str] = args.get("ids") or []
+    if not ids:
+        single = (args.get("id") or "").strip()
+        if not single:
+            return "memory_delete: missing 'id' (or provide 'ids' array)."
+        ids = [single]
+
+    results: list[str] = []
+    for memory_id in ids:
+        memory_id = memory_id.strip()
+        if not memory_id:
+            continue
+        await db.delete_memory(memory_id)
+        results.append(f"Deleted {memory_id}")
+    return "memory_delete: " + " | ".join(results) if results else "memory_delete: no valid ids."
 
 
 async def memory_update(args: dict[str, Any]) -> str:
-    memory_id = (args.get("id") or "").strip()
-    if not memory_id:
-        return "memory_update: missing 'id'."
-    kind = args.get("kind")
-    content = args.get("content")
-    if kind is None and content is None:
-        return "memory_update: provide 'kind' and/or 'content'."
+    """Update one or more memory entries.
+
+    Accepts the legacy single-item form (``id`` + ``kind``/``content``) or a
+    batch ``items`` array of ``{id, kind?, content?}`` objects.
+    """
     db = await get_db()
-    await db.update_memory(memory_id, kind=kind, content=content)
-    return f"Updated memory entry {memory_id}."
+    items: list[dict[str, Any]] = args.get("items") or []
+    if not items:
+        memory_id = (args.get("id") or "").strip()
+        if not memory_id:
+            return "memory_update: missing 'id' (or provide 'items' array)."
+        kind = args.get("kind")
+        content = args.get("content")
+        if kind is None and content is None:
+            return "memory_update: provide 'kind' and/or 'content'."
+        items = [{"id": memory_id, "kind": kind, "content": content}]
+
+    results: list[str] = []
+    for item in items:
+        memory_id = (item.get("id") or "").strip()
+        if not memory_id:
+            results.append("memory_update: skipped item with empty 'id'.")
+            continue
+        kind = item.get("kind")
+        content = item.get("content")
+        if kind is None and content is None:
+            results.append(f"memory_update: skipped {memory_id} (no kind/content).")
+            continue
+        await db.update_memory(memory_id, kind=kind, content=content)
+        results.append(f"Updated {memory_id}")
+    return "memory_update: " + " | ".join(results)
 
 
 # --------------------------------------------------------------------------- #
@@ -172,10 +251,16 @@ async def memory_update(args: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 async def skill_report(args: dict[str, Any]) -> str:
     db = await get_db()
-    skills = await db.list_skills(limit=int(args.get("limit", 40)))
+    query = (args.get("query") or "").strip()
+    skills = await db.list_skills(limit=int(args.get("limit", 80)))
+    if query:
+        skills = [s for s in skills if _matches(query, s["name"], s["domain"], s["status"])]
     if not skills:
+        if query:
+            return f"No skills match {query!r}."
         return "No skills tracked yet for this learner."
-    lines = ["Learner skill estimates:"]
+    header = f"Skill estimates matching {query!r}:" if query else "Learner skill estimates:"
+    lines = [header]
     for s in skills:
         lines.append(
             f"- {s['name']} [{s['domain'] or 'general'}]: {s['status']} "
@@ -185,27 +270,58 @@ async def skill_report(args: dict[str, Any]) -> str:
 
 
 async def skill_update(args: dict[str, Any]) -> str:
-    name = (args.get("name") or "").strip()
-    if not name:
-        return "skill_update: missing 'name'."
+    """Update one or more skill estimates.
+
+    Accepts the legacy single-skill form or a batch ``items`` array of skill
+    objects (each with ``name``, ``domain``, ``status``, ``confidence``,
+    ``evidence``).
+    """
     db = await get_db()
-    await db.update_skill(
-        name=name,
-        domain=args.get("domain"),
-        status=args.get("status"),
-        confidence=args.get("confidence"),
-        evidence=args.get("evidence"),
-    )
-    return f"Updated skill '{name}'."
+    items: list[dict[str, Any]] = args.get("items") or []
+    if not items:
+        name = (args.get("name") or "").strip()
+        if not name:
+            return "skill_update: missing 'name' (or provide 'items' array)."
+        items = [args]
+
+    results: list[str] = []
+    for item in items:
+        name = (item.get("name") or "").strip()
+        if not name:
+            results.append("skill_update: skipped item with empty 'name'.")
+            continue
+        await db.update_skill(
+            name=name,
+            domain=item.get("domain"),
+            status=item.get("status"),
+            confidence=item.get("confidence"),
+            evidence=item.get("evidence"),
+        )
+        results.append(f"Updated '{name}'")
+    return "skill_update: " + " | ".join(results)
 
 
 async def skill_delete(args: dict[str, Any]) -> str:
-    name = (args.get("name") or "").strip()
-    if not name:
-        return "skill_delete: missing 'name'."
+    """Delete one or more skills.
+
+    Accepts a single ``name`` or a batch ``names`` array.
+    """
     db = await get_db()
-    await db.delete_skill(name)
-    return f"Deleted skill '{name}'."
+    names: list[str] = args.get("names") or []
+    if not names:
+        single = (args.get("name") or "").strip()
+        if not single:
+            return "skill_delete: missing 'name' (or provide 'names' array)."
+        names = [single]
+
+    results: list[str] = []
+    for name in names:
+        name = name.strip()
+        if not name:
+            continue
+        await db.delete_skill(name)
+        results.append(f"Deleted '{name}'")
+    return "skill_delete: " + " | ".join(results) if results else "skill_delete: no valid names."
 
 
 # --------------------------------------------------------------------------- #
@@ -231,73 +347,167 @@ async def knowledge_lookup(args: dict[str, Any]) -> str:
 
 
 async def knowledge_add(args: dict[str, Any]) -> str:
-    label = (args.get("label") or "").strip()
-    if not label:
-        return "knowledge_add: missing 'label'."
+    """Add or update one or more concepts in the knowledge graph.
+
+    Accepts the legacy single-concept form or a batch ``items`` array of
+    concept objects (each with ``label``, ``subject``, ``summary``,
+    ``relates_to``).
+    """
     db = await get_db()
-    await db.upsert_knowledge_node(label, args.get("subject"), args.get("summary"))
-    for rel in args.get("relates_to") or []:
-        await db.add_knowledge_edge(label, rel, "relates_to", args.get("subject"))
-    return f"Recorded concept '{label}'."
+    items: list[dict[str, Any]] = args.get("items") or []
+    if not items:
+        label = (args.get("label") or "").strip()
+        if not label:
+            return "knowledge_add: missing 'label' (or provide 'items' array)."
+        items = [args]
+
+    results: list[str] = []
+    for item in items:
+        label = (item.get("label") or "").strip()
+        if not label:
+            results.append("knowledge_add: skipped item with empty 'label'.")
+            continue
+        await db.upsert_knowledge_node(label, item.get("subject"), item.get("summary"))
+        for rel in item.get("relates_to") or []:
+            await db.add_knowledge_edge(label, rel, "relates_to", item.get("subject"))
+        results.append(f"Recorded '{label}'")
+    return "knowledge_add: " + " | ".join(results)
 
 
 async def knowledge_delete(args: dict[str, Any]) -> str:
-    label = (args.get("label") or "").strip()
-    if not label:
-        return "knowledge_delete: missing 'label'."
+    """Delete one or more concepts from the knowledge graph.
+
+    Accepts a single ``label`` or a batch ``labels`` array.
+    """
     db = await get_db()
-    ok = await db.delete_knowledge_node(label)
-    if not ok:
-        return f"knowledge_delete: concept '{label}' not found."
-    return f"Deleted concept '{label}' and its edges."
+    labels: list[str] = args.get("labels") or []
+    if not labels:
+        single = (args.get("label") or "").strip()
+        if not single:
+            return "knowledge_delete: missing 'label' (or provide 'labels' array)."
+        labels = [single]
+
+    results: list[str] = []
+    for label in labels:
+        label = label.strip()
+        if not label:
+            continue
+        ok = await db.delete_knowledge_node(label)
+        if ok:
+            results.append(f"Deleted '{label}'")
+        else:
+            results.append(f"'{label}' not found")
+    return "knowledge_delete: " + " | ".join(results) if results else "knowledge_delete: no valid labels."
 
 
 async def knowledge_update(args: dict[str, Any]) -> str:
-    old_label = (args.get("old_label") or "").strip()
-    new_label = (args.get("new_label") or "").strip()
-    if not old_label or not new_label:
-        return "knowledge_update: missing 'old_label' or 'new_label'."
+    """Rename/merge one or more concepts in the knowledge graph.
+
+    Accepts the legacy single form (``old_label`` + ``new_label``) or a batch
+    ``items`` array of ``{old_label, new_label, subject?, summary?}`` objects.
+    """
     db = await get_db()
-    ok = await db.rename_knowledge_node(
-        old_label, new_label, subject=args.get("subject"), summary=args.get("summary")
-    )
-    if not ok:
-        return f"knowledge_update: concept '{old_label}' not found."
-    return f"Renamed concept '{old_label}' → '{new_label}'."
+    items: list[dict[str, Any]] = args.get("items") or []
+    if not items:
+        old_label = (args.get("old_label") or "").strip()
+        new_label = (args.get("new_label") or "").strip()
+        if not old_label or not new_label:
+            return "knowledge_update: missing 'old_label'/'new_label' (or provide 'items' array)."
+        items = [args]
+
+    results: list[str] = []
+    for item in items:
+        old_label = (item.get("old_label") or "").strip()
+        new_label = (item.get("new_label") or "").strip()
+        if not old_label or not new_label:
+            results.append("knowledge_update: skipped item missing old_label/new_label.")
+            continue
+        ok = await db.rename_knowledge_node(
+            old_label, new_label, subject=item.get("subject"), summary=item.get("summary")
+        )
+        if ok:
+            results.append(f"'{old_label}' → '{new_label}'")
+        else:
+            results.append(f"'{old_label}' not found")
+    return "knowledge_update: " + " | ".join(results)
 
 
 # --------------------------------------------------------------------------- #
 # Concept progress (per-question checklist)
 # --------------------------------------------------------------------------- #
 async def review_skill(args: dict[str, Any]) -> str:
-    """Record the outcome of a spaced-repetition review for a skill."""
-    name = (args.get("name") or "").strip()
-    if not name:
-        return "review_skill: missing 'name'."
-    quality = int(args.get("quality", 3))
+    """Record the outcome of one or more spaced-repetition reviews.
+
+    Accepts the legacy single form (``name`` + ``quality``) or a batch
+    ``items`` array of ``{name, quality}`` objects.
+    """
     db = await get_db()
-    await db.record_review(name, quality)
-    return f"Recorded review for '{name}' (quality {quality}). Next review scheduled."
+    items: list[dict[str, Any]] = args.get("items") or []
+    if not items:
+        name = (args.get("name") or "").strip()
+        if not name:
+            return "review_skill: missing 'name' (or provide 'items' array)."
+        items = [{"name": name, "quality": args.get("quality", 3)}]
+
+    results: list[str] = []
+    for item in items:
+        name = (item.get("name") or "").strip()
+        if not name:
+            results.append("review_skill: skipped item with empty 'name'.")
+            continue
+        quality = int(item.get("quality", 3))
+        await db.record_review(name, quality)
+        results.append(f"Reviewed '{name}' (quality {quality})")
+    return "review_skill: " + " | ".join(results)
 
 
 async def concept_progress(args: dict[str, Any]) -> str:
+    """Track the per-question concept checklist.
+
+    For ``action='set'``, accepts either a single ``concept``/``status`` pair
+    or a batch ``concepts`` array of ``{concept, status}`` objects so multiple
+    checklist items can be updated in one call.
+    """
     session_id = (args.get("session_id") or "").strip()
     if not session_id:
         return "concept_progress: missing 'session_id'."
     db = await get_db()
     action = args.get("action", "list")
+
     if action == "set":
-        concept = (args.get("concept") or "").strip()
-        status = (args.get("status") or "demonstrated").strip()
-        if not concept:
-            return "concept_progress: 'set' needs a 'concept'."
-        await db.set_concept_progress(session_id, concept, status)
-        return f"Marked '{concept}' as {status}."
+        # Batch path: ``concepts`` array.
+        concepts: list[dict[str, Any]] = args.get("concepts") or []
+        if not concepts:
+            # Backward-compatible single-item path.
+            concept = (args.get("concept") or "").strip()
+            status = (args.get("status") or "demonstrated").strip()
+            if not concept:
+                return "concept_progress: 'set' needs a 'concept' (or 'concepts' array)."
+            concepts = [{"concept": concept, "status": status}]
+
+        results: list[str] = []
+        for entry in concepts:
+            concept = (entry.get("concept") or "").strip()
+            status = (entry.get("status") or "demonstrated").strip()
+            if not concept:
+                results.append("skipped empty concept")
+                continue
+            await db.set_concept_progress(session_id, concept, status)
+            results.append(f"'{concept}' → {status}")
+        return "concept_progress: " + " | ".join(results)
+
+    # action == "list"
+    query = (args.get("query") or "").strip()
     rows = await db.list_concept_progress(session_id)
+    if query:
+        rows = [r for r in rows if _matches(query, r["concept"], r["status"])]
     if not rows:
+        if query:
+            return f"No checklist concepts match {query!r}."
         return "No concept checklist yet for this question."
     mark = {"demonstrated": "✓", "next": "○", "locked": "○"}
-    return "Concept checklist:\n" + "\n".join(
+    header = f"Concept checklist matching {query!r}:" if query else "Concept checklist:"
+    return header + "\n" + "\n".join(
         f"{mark.get(r['status'], '○')} {r['concept']} — {r['status']}" for r in rows
     )
 
@@ -348,14 +558,21 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "recall_memory",
             "description": (
-                "Read your long-term memory about THIS learner: their goals, prior "
-                "knowledge, preferences, recurring mistakes. Call this when starting "
-                "a topic so you don't repeat yourself."
+                "SEARCH your long-term memory about THIS learner (goals, prior "
+                "knowledge, preferences, recurring mistakes). Pass a 'query' to "
+                "filter to matching entries rather than dumping everything — e.g. "
+                "query='recursion' or query='preference'. Call this when starting a "
+                "topic so you don't repeat yourself. Omit 'query' to list the most "
+                "recent entries."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max entries.", "default": 25}
+                    "query": {
+                        "type": "string",
+                        "description": "Optional keyword to filter memories (case-insensitive substring match).",
+                    },
+                    "limit": {"type": "integer", "description": "Max entries to scan.", "default": 50},
                 },
             },
         },
@@ -365,8 +582,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "remember",
             "description": (
-                "Store a durable fact about the learner in long-term memory. Use for "
-                "goals, prior knowledge, preferences, recurring mistakes — not chatter."
+                "Store one or more durable facts about the learner in long-term "
+                "memory. Use for goals, prior knowledge, preferences, recurring "
+                "mistakes — not chatter. To store multiple facts in one call, pass "
+                "an 'items' array of {kind, content} objects instead of calling "
+                "this tool repeatedly."
             ),
             "parameters": {
                 "type": "object",
@@ -374,11 +594,25 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "kind": {
                         "type": "string",
                         "enum": ["preference", "fact", "goal", "note"],
-                        "description": "Category of the memory.",
+                        "description": "Category of the memory (single-item mode).",
                     },
-                    "content": {"type": "string", "description": "The fact to remember."},
+                    "content": {"type": "string", "description": "The fact to remember (single-item mode)."},
+                    "items": {
+                        "type": "array",
+                        "description": "Batch mode: array of {kind, content} objects to store in one call.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["preference", "fact", "goal", "note"],
+                                },
+                                "content": {"type": "string"},
+                            },
+                            "required": ["content"],
+                        },
+                    },
                 },
-                "required": ["content"],
             },
         },
     },
@@ -386,11 +620,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "skill_report",
-            "description": "Read your running estimate of the learner's skills and confidence.",
+            "description": (
+                "SEARCH your running estimate of the learner's skills and confidence. "
+                "Pass a 'query' to filter to matching skills (by name, domain or "
+                "status) instead of listing everything — e.g. query='loop'. Omit "
+                "'query' to list all tracked skills."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "default": 40}
+                    "query": {
+                        "type": "string",
+                        "description": "Optional keyword to filter skills (case-insensitive substring match).",
+                    },
+                    "limit": {"type": "integer", "default": 80},
                 },
             },
         },
@@ -400,13 +643,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "skill_update",
             "description": (
-                "Update the learner's estimated competence for a skill based on "
-                "evidence from the conversation."
+                "Update the learner's estimated competence for one or more skills "
+                "based on evidence from the conversation. To update multiple skills "
+                "in one call, pass an 'items' array of skill objects instead of "
+                "calling this tool repeatedly."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Skill name."},
+                    "name": {"type": "string", "description": "Skill name (single-item mode)."},
                     "domain": {"type": "string", "description": "Subject area."},
                     "status": {
                         "type": "string",
@@ -414,8 +659,25 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                     "confidence": {"type": "number", "description": "0.0 to 1.0."},
                     "evidence": {"type": "string", "description": "Short note on why."},
+                    "items": {
+                        "type": "array",
+                        "description": "Batch mode: array of skill objects to update in one call.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "domain": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["locked", "emerging", "demonstrated"],
+                                },
+                                "confidence": {"type": "number"},
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["name"],
+                        },
+                    },
                 },
-                "required": ["name"],
             },
         },
     },
@@ -441,15 +703,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "knowledge_add",
             "description": (
-                "Add or update a concept in your knowledge graph, with optional links. "
-                "IMPORTANT: Before adding, call knowledge_lookup to check if the concept "
-                "already exists under a similar name. Reuse existing names — do NOT create "
-                "near-duplicates (e.g. 'for loop' vs 'for-loop' vs 'for loops')."
+                "Add or update one or more concepts in your knowledge graph, with "
+                "optional links. IMPORTANT: Before adding, call knowledge_lookup to "
+                "check if the concept already exists under a similar name. Reuse "
+                "existing names — do NOT create near-duplicates. To add multiple "
+                "concepts in one call, pass an 'items' array of concept objects."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "label": {"type": "string", "description": "Concept name."},
+                    "label": {"type": "string", "description": "Concept name (single-item mode)."},
                     "subject": {"type": "string", "description": "Subject area."},
                     "summary": {"type": "string", "description": "Tight summary."},
                     "relates_to": {
@@ -457,8 +720,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "items": {"type": "string"},
                         "description": "Other concept names this relates to.",
                     },
+                    "items": {
+                        "type": "array",
+                        "description": "Batch mode: array of concept objects to add in one call.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "subject": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "relates_to": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["label"],
+                        },
+                    },
                 },
-                "required": ["label"],
             },
         },
     },
@@ -467,23 +746,39 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "review_skill",
             "description": (
-                "Record the outcome of a spaced-repetition review question. Call this "
-                "after the learner answers a review question. quality is 0-5 on the "
-                "SM-2 scale: 5 = perfect recall, 3 = correct with difficulty, "
-                "0 = complete failure."
+                "Record the outcome of one or more spaced-repetition review "
+                "questions. Call this after the learner answers review questions. "
+                "quality is 0-5 on the SM-2 scale: 5 = perfect recall, 3 = correct "
+                "with difficulty, 0 = complete failure. To record multiple reviews "
+                "in one call, pass an 'items' array of {name, quality} objects."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Skill name being reviewed."},
+                    "name": {"type": "string", "description": "Skill name being reviewed (single-item mode)."},
                     "quality": {
                         "type": "integer",
                         "description": "Recall quality 0-5 (SM-2 scale).",
                         "minimum": 0,
                         "maximum": 5,
                     },
+                    "items": {
+                        "type": "array",
+                        "description": "Batch mode: array of {name, quality} objects.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "quality": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 5,
+                                },
+                            },
+                            "required": ["name", "quality"],
+                        },
+                    },
                 },
-                "required": ["name", "quality"],
             },
         },
     },
@@ -491,13 +786,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "memory_delete",
-            "description": "Delete a long-term memory entry by its id.",
+            "description": (
+                "Delete one or more long-term memory entries by id. To delete "
+                "multiple entries in one call, pass an 'ids' array."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Memory entry id to delete."}
+                    "id": {"type": "string", "description": "Memory entry id to delete (single-item mode)."},
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Batch mode: array of memory entry ids to delete.",
+                    },
                 },
-                "required": ["id"],
             },
         },
     },
@@ -505,19 +807,38 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "memory_update",
-            "description": "Update an existing long-term memory entry's kind and/or content.",
+            "description": (
+                "Update one or more long-term memory entries' kind and/or content. "
+                "To update multiple entries in one call, pass an 'items' array of "
+                "{id, kind?, content?} objects."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Memory entry id."},
+                    "id": {"type": "string", "description": "Memory entry id (single-item mode)."},
                     "kind": {
                         "type": "string",
                         "enum": ["preference", "fact", "goal", "note"],
                         "description": "New category.",
                     },
                     "content": {"type": "string", "description": "New content."},
+                    "items": {
+                        "type": "array",
+                        "description": "Batch mode: array of {id, kind?, content?} objects.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["preference", "fact", "goal", "note"],
+                                },
+                                "content": {"type": "string"},
+                            },
+                            "required": ["id"],
+                        },
+                    },
                 },
-                "required": ["id"],
             },
         },
     },
@@ -525,13 +846,20 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "skill_delete",
-            "description": "Delete a skill from the learner's skill graph.",
+            "description": (
+                "Delete one or more skills from the learner's skill graph. To "
+                "delete multiple skills in one call, pass a 'names' array."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Skill name to delete."}
+                    "name": {"type": "string", "description": "Skill name to delete (single-item mode)."},
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Batch mode: array of skill names to delete.",
+                    },
                 },
-                "required": ["name"],
             },
         },
     },
@@ -539,13 +867,21 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "knowledge_delete",
-            "description": "Delete a concept (and its edges) from the knowledge graph.",
+            "description": (
+                "Delete one or more concepts (and their edges) from the knowledge "
+                "graph. To delete multiple concepts in one call, pass a 'labels' "
+                "array."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "label": {"type": "string", "description": "Concept label to delete."}
+                    "label": {"type": "string", "description": "Concept label to delete (single-item mode)."},
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Batch mode: array of concept labels to delete.",
+                    },
                 },
-                "required": ["label"],
             },
         },
     },
@@ -554,18 +890,33 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "knowledge_update",
             "description": (
-                "Rename/merge a concept in the knowledge graph. If new_label already "
-                "exists, the old node is merged into it and edges are preserved."
+                "Rename/merge one or more concepts in the knowledge graph. If "
+                "new_label already exists, the old node is merged into it and edges "
+                "are preserved. To rename multiple concepts in one call, pass an "
+                "'items' array of {old_label, new_label, subject?, summary?} objects."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "old_label": {"type": "string", "description": "Current concept label."},
+                    "old_label": {"type": "string", "description": "Current concept label (single-item mode)."},
                     "new_label": {"type": "string", "description": "New concept label."},
                     "subject": {"type": "string", "description": "Optional new subject."},
                     "summary": {"type": "string", "description": "Optional new summary."},
+                    "items": {
+                        "type": "array",
+                        "description": "Batch mode: array of rename objects.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_label": {"type": "string"},
+                                "new_label": {"type": "string"},
+                                "subject": {"type": "string"},
+                                "summary": {"type": "string"},
+                            },
+                            "required": ["old_label", "new_label"],
+                        },
+                    },
                 },
-                "required": ["old_label", "new_label"],
             },
         },
     },
@@ -581,6 +932,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "demonstrates understanding of a concept — do not wait. When you "
                 "start a new topic, seed it with the key concepts as 'next'. "
                 "Use the session_id from your context block. "
+                "To set multiple concepts in one call, pass a 'concepts' array of "
+                "{concept, status} objects. "
                 "Omit action (or use 'list') to see the current checklist state."
             ),
             "parameters": {
@@ -588,11 +941,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "session_id": {"type": "string", "description": "Current session id."},
                     "action": {"type": "string", "enum": ["list", "set"], "default": "list"},
-                    "concept": {"type": "string", "description": "Concept name (for set)."},
+                    "concept": {"type": "string", "description": "Concept name (single-item set)."},
                     "status": {
                         "type": "string",
                         "enum": ["locked", "next", "demonstrated"],
                         "default": "demonstrated",
+                    },
+                    "concepts": {
+                        "type": "array",
+                        "description": "Batch mode: array of {concept, status} objects to set in one call.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "concept": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["locked", "next", "demonstrated"],
+                                },
+                            },
+                            "required": ["concept"],
+                        },
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional keyword to filter the listed checklist (case-insensitive substring match on concept/status).",
                     },
                 },
                 "required": ["session_id"],

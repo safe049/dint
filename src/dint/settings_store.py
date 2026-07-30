@@ -39,6 +39,8 @@ EDITABLE_FIELDS = (
     "reflect_model",
     "dint_temperature",
     "max_tool_rounds",
+    "max_tool_calls_per_turn",   
+    "max_reflect_updates",           
     "web_search_results",
 )
 
@@ -118,7 +120,17 @@ def _coerce(key: str, value: Any) -> Any:
         if not lo <= v <= hi:
             raise ValueError(f"{key} must be between {lo} and {hi}")
         return v
-    return str(value).strip()
+    if key in ("max_tool_calls_per_turn",):
+        v = int(value)
+        if not 1 <= v <= 20:
+            raise ValueError("max_tool_calls_per_turn must be between 1 and 20")
+        return v
+    if key in ("max_reflect_updates",):
+        v = int(value)
+        if not 1 <= v <= 12:
+            raise ValueError("max_reflect_updates must be between 1 and 12")
+        return v
+    return str(value).strip()        
 
 
 def save(updates: dict[str, Any]) -> dict[str, Any]:

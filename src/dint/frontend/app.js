@@ -468,23 +468,41 @@ async function sendMessage() {
   const bubble = appendMessage("assistant", "");
   bubble.classList.add("streaming");
   let acc = "";
-
   state.abort = new AbortController();
+
+  // 统一的清理逻辑，只在流真正结束后调用一次
+  const finish = () => {
+    bubble.classList.remove("streaming");
+    state.sending = false;
+    state.abort = null;
+    setSendStopMode(false);
+    scrollChat(true);
+    loadSessions();
+    renderLearnerModel();
+  };
+
   try {
-    await streamChat(text, {
-      onToken: (tok) => {
-        acc += tok;
-        bubble.innerHTML = renderMarkdown(acc);
-        scrollChat();
-      },
-      onToolCall: (name, args) => appendToolChip(bubble, name, args),
-      onDone: (data) => {
-        if (!acc && data && data.reply) {
-          acc = data.reply;
+    await streamChat(
+      text,
+      {
+        onToken: (tok) => {
+          acc += tok;
           bubble.innerHTML = renderMarkdown(acc);
-        }
+          scrollChat();
+        },
+        onToolCall: (name, args) => appendToolChip(bubble, name, args),
+        onDone: (data) => {
+          if (!acc && data && data.reply) {
+            acc = data.reply;
+            bubble.innerHTML = renderMarkdown(acc);
+          }
+          finish();
+        },
       },
-    }, state.abort.signal);
+      state.abort.signal
+    );
+    // 如果 streamChat 正常 resolve 但 onDone 没触发（不应该发生），兜底
+    if (state.sending) finish();
   } catch (e) {
     if (e.name === "AbortError") {
       if (!acc) bubble.innerHTML = renderMarkdown("…");
@@ -493,14 +511,7 @@ async function sendMessage() {
     } else {
       toast(t("err_stream", { msg: e.message }), "error");
     }
-  } finally {
-    bubble.classList.remove("streaming");
-    state.sending = false;
-    state.abort = null;
-    setSendStopMode(false);
-    scrollChat(true);
-    loadSessions();
-    renderLearnerModel();
+    finish();
   }
 }
 
@@ -1569,6 +1580,8 @@ const SETTING_KEYS = [
   "dint_temperature",
   "max_tool_rounds",
   "web_search_results",
+  "max_tool_calls_per_turn",
+  "max_reflect_updates",  
 ];
 
 async function openSettings() {
@@ -1604,6 +1617,8 @@ async function saveSettings() {
     if (
       key === "dint_temperature" ||
       key === "max_tool_rounds" ||
+      key === "max_tool_calls_per_turn" ||
+      key === "max_reflect_updates" ||      
       key === "web_search_results"
     ) {
       val = val === "" ? null : Number(val);

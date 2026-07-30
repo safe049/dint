@@ -19,6 +19,7 @@ from typing import Any
 
 from .db import get_db
 from .llm import simple_completion
+from . import settings_store
 
 _REFLECT_SYSTEM = """You are the background self-model of "dint", a Socratic tutor.
 You just finished an exchange with a learner. The user message gives you your
@@ -103,6 +104,10 @@ Rules:
   a mere claim is NOT enough; mark it "next" until verified. If they previously
   showed it but now struggle, downgrade it back to "next"/"locked". Use lowercase,
   space-separated concept names consistent with the knowledge graph labels.
+- If the learner CORRECTS a belief the tutor held (e.g. "you don't need to 
+  close because the server closes first"), that correction is ground truth.
+  Update concept_progress to "demonstrated" for the concept the correction 
+  addresses, and record a memory noting the corrected understanding.  
 - If nothing durable happened, return exactly: {}
 - Output JSON only. No prose, no markdown fences.
 - Only output English, no other languages. """
@@ -191,9 +196,18 @@ async def reflect(session_id: str, transcript: list[dict[str, Any]]) -> dict[str
     if not patch:
         return counts
 
+    # ── Per-category cap ────────────────────────────────────────────────
+    # A single reflection pass used to apply *every* item the model emitted,
+    # which could dump a dozen skill/knowledge/memory writes in one shot.
+    # Truncate each category to ``max_reflect_updates`` so one exchange can't
+    # flood the learner model. The most important updates come first in the
+    # model's output, so head-truncation keeps the signal.
+    cfg = settings_store.effective()
+    cap = int(cfg.get("max_reflect_updates", 4))
+
     # --- Skills: merge into existing similar skill if found ---------------- #
     existing_skills = await db.list_skills(limit=200)
-    for skill in patch.get("skills") or []:
+    for skill in (patch.get("skills") or [])[:cap]:
         name = str(skill.get("name") or "").strip()
         if not name:
             continue
@@ -210,7 +224,7 @@ async def reflect(session_id: str, transcript: list[dict[str, Any]]) -> dict[str
 
     # --- Knowledge: merge into existing similar concept if found ----------- #
     existing_knowledge = (await db.knowledge_subgraph(limit=200))["nodes"]
-    for node in patch.get("knowledge") or []:
+    for node in (patch.get("knowledge") or [])[:cap]:
         label = str(node.get("label") or "").strip()
         if not label:
             continue
@@ -225,7 +239,7 @@ async def reflect(session_id: str, transcript: list[dict[str, Any]]) -> dict[str
             )
         counts["knowledge"] += 1
 
-    for mem in patch.get("memories") or []:
+    for mem in (patch.get("memories") or [])[:cap]:
         content = str(mem.get("content") or "").strip()
         if not content:
             continue
@@ -238,9 +252,7 @@ async def reflect(session_id: str, transcript: list[dict[str, Any]]) -> dict[str
         counts["memories"] += 1
 
     # --- Memory corrections: repair stale beliefs the behavior contradicts - #
-    # Turns an outdated "learner understands X" into "learner does not
-    # understand X well" in place, so contradicting memories don't pile up.
-    for corr in patch.get("memory_corrections") or []:
+    for corr in (patch.get("memory_corrections") or [])[:cap]:
         content = str(corr.get("content") or "").strip()
         if not content:
             continue
@@ -255,7 +267,7 @@ async def reflect(session_id: str, transcript: list[dict[str, Any]]) -> dict[str
         counts["memory_corrections"] = counts.get("memory_corrections", 0) + 1
 
     # --- Concept progress: update the per-session whiteboard checklist ----- #
-    for cp in patch.get("concept_progress") or []:
+    for cp in (patch.get("concept_progress") or [])[:cap]:
         concept = str(cp.get("concept") or "").strip()
         if not concept:
             continue

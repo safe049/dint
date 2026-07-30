@@ -645,13 +645,25 @@ class Database:
             await db.commit()
             return True
 
-    async def list_messages(self, session_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    async def list_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         async with self._conn() as db:
-            rows = await db.execute_fetchall(
-                "SELECT id, role, content, tool_name, meta, created_at FROM messages "
-                "WHERE session_id = ? ORDER BY created_at ASC LIMIT ?",
-                (session_id, limit),
-            )
+            if limit is not None:
+                # 修复 Bug：先倒序取最新的 limit 条，再在外层正序排列
+                rows = await db.execute_fetchall(
+                    "SELECT * FROM ("
+                    "  SELECT id, role, content, tool_name, meta, created_at FROM messages "
+                    "  WHERE session_id = ? ORDER BY created_at DESC LIMIT ?"
+                    ") ORDER BY created_at ASC",
+                    (session_id, limit),
+                )
+            else:
+                # 不截断：直接按时间正序获取全部消息
+                rows = await db.execute_fetchall(
+                    "SELECT id, role, content, tool_name, meta, created_at FROM messages "
+                    "WHERE session_id = ? ORDER BY created_at ASC",
+                    (session_id,),
+                )
+            
             out = []
             for r in rows:
                 d = dict(r)
@@ -843,6 +855,100 @@ class Database:
             await db.commit()
         return counts
 
+
+    async def repair_session(self, session_id: str) -> dict[str, int]:
+        """One-time cleanup for a session with known data issues.
+
+        1. Remove consecutive duplicate user messages (same content, same role,
+        back-to-back or separated only by assistant messages that themselves
+        are duplicates).
+        2. Strip residual inline tool-call JSON blocks from assistant message
+        content.
+
+        Returns counts of rows touched.
+        """
+        import re
+
+        counts = {"dupes_removed": 0, "content_cleaned": 0}
+
+        async with self._conn() as db:
+            rows = await db.execute_fetchall(
+                "SELECT id, role, content, created_at FROM messages "
+                "WHERE session_id = ? ORDER BY created_at ASC",
+                (session_id,),
+            )
+
+            # ── Pass 1: remove consecutive duplicate user messages ──────────
+            # "Consecutive" here means: same role + same stripped content,
+            # with no *different* user message in between. An assistant reply
+            # between two identical user messages does NOT break the duplicate
+            # chain (that's exactly the glitch pattern: user sends twice, gets
+            # two different replies).
+            seen_user_contents: dict[str, str] = {}  # content -> first msg id
+            ids_to_delete: list[str] = []
+
+            for r in rows:
+                role = r["role"]
+                content = (r["content"] or "").strip()
+                if role == "user" and content:
+                    if content in seen_user_contents:
+                        # Duplicate — mark the later one for deletion
+                        ids_to_delete.append(r["id"])
+                        counts["dupes_removed"] += 1
+                    else:
+                        seen_user_contents[content] = r["id"]
+
+            for mid in ids_to_delete:
+                await db.execute("DELETE FROM messages WHERE id = ?", (mid,))
+
+            # ── Pass 2: strip residual tool-call JSON from assistant msgs ───
+            # Re-fetch after deletions.
+            rows = await db.execute_fetchall(
+                "SELECT id, content FROM messages "
+                "WHERE session_id = ? AND role = 'assistant' ORDER BY created_at ASC",
+                (session_id,),
+            )
+
+            # Same regexes the agent uses, applied to stored content.
+            fenced_re = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.DOTALL)
+            bare_re = re.compile(
+                r'\{[^{}]*?"tool_calls"\s*:\s*\[.*?\]\s*\}', re.DOTALL
+            )
+
+            for r in rows:
+                content = r["content"] or ""
+                cleaned = content
+
+                # Strip fenced blocks that contain tool_calls
+                def _strip_fenced(m: re.Match) -> str:
+                    body = m.group(1).strip()
+                    if '"tool_calls"' in body:
+                        return ""
+                    return m.group(0)
+
+                cleaned = fenced_re.sub(_strip_fenced, cleaned)
+
+                # Strip bare {"tool_calls": [...]} objects
+                def _strip_bare(m: re.Match) -> str:
+                    if '"tool_calls"' in m.group(0):
+                        return ""
+                    return m.group(0)
+
+                cleaned = bare_re.sub(_strip_bare, cleaned)
+
+                # Collapse blank lines
+                cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+                if cleaned != content:
+                    await db.execute(
+                        "UPDATE messages SET content = ? WHERE id = ?",
+                        (cleaned, r["id"]),
+                    )
+                    counts["content_cleaned"] += 1
+
+            await db.commit()
+
+        return counts
 
 # One Database instance per storage scope (per user in host mode, a single
 # "local" scope in local mode). Keyed by ``scope.scope_key()`` so the entire

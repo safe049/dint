@@ -680,10 +680,13 @@ html, body {
   margin: 10vh auto;
   width: 460px;
   max-width: 92vw;
+  max-height: 80vh;            /* 新增 */
+  display: flex;               /* 新增 */
+  flex-direction: column;      /* 新增 */
   background: var(--surface);
   border: 1px solid var(--border-light);
   animation: msg-in 0.2s ease-out;
-  overflow: hidden;
+  overflow: contain;
 }
 .modal-header {
   display: flex;
@@ -698,7 +701,12 @@ html, body {
   letter-spacing: 2px;
   color: var(--white);
 }
-.modal-body { padding: 20px 22px; }
+.modal-body {
+  padding: 20px 22px;
+  flex: 1 1 auto;              /* 新增 */
+  min-height: 0;               /* 新增 —— 缺了它 flex 子元素不会收缩 */
+  overflow-y: auto;            /* 新增 */
+}
 .modal-body label {
   display: block;
   font-size: 11px;

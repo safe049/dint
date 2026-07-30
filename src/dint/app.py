@@ -19,9 +19,9 @@ from typing import Any, Optional
 
 import json
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -50,49 +50,96 @@ _PUBLIC_PREFIXES = ("/api/auth/", "/api/mode", "/assets/", "/i18n.js")
 _PUBLIC_EXACT = {"/", "/index.html", "/app.js", "/style.css", "/favicon.svg", "/favicon.ico"}
 
 
-def _extract_token(request: Request) -> Optional[str]:
-    """Pull the session token from the cookie or an Authorization bearer header."""
-    token = request.cookies.get("dint_session")
-    if token:
-        return token
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return None
+def _token_from_headers(asgi_scope: dict) -> Optional[str]:
+    """Pull the session token from ASGI scope headers (cookie or bearer).
+
+    Mirrors the old ``_extract_token``: the ``dint_session`` cookie wins, with
+    an ``Authorization: Bearer …`` header as fallback.
+    """
+    cookie_token: Optional[str] = None
+    bearer_token: Optional[str] = None
+    for raw_name, raw_value in asgi_scope.get("headers", []):
+        name = raw_name.decode("latin-1").lower()
+        value = raw_value.decode("latin-1")
+        if name == "authorization" and value.lower().startswith("bearer "):
+            bearer_token = value[7:].strip()
+        elif name == "cookie":
+            for part in value.split(";"):
+                part = part.strip()
+                if part.startswith("dint_session="):
+                    cookie_token = part[len("dint_session="):]
+    return cookie_token or bearer_token
 
 
-@app.middleware("http")
-async def _scope_middleware(request: Request, call_next):
-    """Bind every request to a user scope before it reaches the data layer.
+class ScopeMiddleware:
+    """Bind a user scope to every HTTP request before it hits the data layer.
+
+    Implemented as *pure* ASGI rather than FastAPI's ``@app.middleware("http")``
+    (``BaseHTTPMiddleware``). The latter wraps each response in a way that both
+    buffers streaming output and releases middleware state as soon as the
+    response *headers* are ready — before an SSE body has finished sending. That
+    broke token-by-token streaming on ``/api/chat/stream`` and could yank the
+    scope ContextVar out from under the still-running stream generator. A pure
+    ASGI middleware awaits the entire inner response lifecycle, so the scope
+    stays bound for the whole stream and is only released afterwards.
 
     * **local** mode: bind the implicit ``LOCAL_USER`` — no login required.
     * **host** mode: resolve the session token; public paths pass through
       unbound, everything else needs a valid session or it gets a 401.
 
-    The ContextVar is reset in ``finally`` so it never leaks between requests.
     Because ``asyncio.create_task`` copies the current context, the background
     reflection task spawned inside ``/api/chat`` inherits the correct scope.
     """
-    path = request.url.path
-    if not scope.is_host_mode():
-        token = scope.set_current_user(scope.LOCAL_USER)
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, asgi_scope, receive, send):
+        if asgi_scope["type"] != "http":
+            await self.app(asgi_scope, receive, send)
+            return
+
+        path = asgi_scope.get("path", "")
+
+        if not scope.is_host_mode():
+            token = scope.set_current_user(scope.LOCAL_USER)
+            try:
+                await self.app(asgi_scope, receive, send)
+            finally:
+                scope.reset_current_user(token)
+            return
+
+        # Host mode.
+        is_public = path in _PUBLIC_EXACT or any(
+            path.startswith(p) for p in _PUBLIC_PREFIXES
+        )
+        username = users.resolve_session(_token_from_headers(asgi_scope))
+        if username is None and not is_public:
+            await self._send_401(send)
+            return
+        token = scope.set_current_user(username)
         try:
-            return await call_next(request)
+            await self.app(asgi_scope, receive, send)
         finally:
             scope.reset_current_user(token)
 
-    # Host mode.
-    is_public = path in _PUBLIC_EXACT or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
-    username = users.resolve_session(_extract_token(request))
-    if username is None and not is_public:
-        return JSONResponse(
-            status_code=401, content={"detail": "authentication required"}
+    @staticmethod
+    async def _send_401(send) -> None:
+        body = json.dumps({"detail": "authentication required"}).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("latin-1")),
+                ],
+            }
         )
-    token = scope.set_current_user(username)
-    try:
-        return await call_next(request)
-    finally:
-        scope.reset_current_user(token)
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(ScopeMiddleware)
 
 
 # --------------------------------------------------------------------------- #
@@ -535,6 +582,15 @@ async def manual_consolidate() -> dict[str, Any]:
     total = sum(merges.values())
     return {"status": "consolidated", "merged": total, "removed": total}
 
+
+@app.post("/api/sessions/{session_id}/repair")
+async def repair_session(session_id: str) -> dict[str, Any]:
+    """One-time data cleanup for a session with known glitches
+    (duplicate user messages, residual tool-call JSON in assistant content).
+    """
+    db = await get_db()
+    counts = await db.repair_session(session_id)
+    return {"status": "repaired", "session_id": session_id, **counts}
 
 # --------------------------------------------------------------------------- #
 # Static frontend

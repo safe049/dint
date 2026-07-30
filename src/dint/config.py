@@ -35,6 +35,8 @@ class Settings(BaseSettings):
 
     # --- Behaviour -------------------------------------------------------
     max_tool_rounds: int = 8
+    max_tool_calls_per_turn: int = 4      # ← 新增：单轮对话总工具调用上限
+    max_reflect_updates: int = 4          # ← 新增：reflection 每类最多更新几条    
     web_search_results: int = 5
     dint_temperature: float = 0.7
 
