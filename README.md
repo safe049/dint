@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">dint</h1>
   <p align="center">
-    <strong>The AI tutor that refuses to give you the answer.</strong>
+    <strong>The tutor that refuses to give you the answer.</strong>
   </p>
 </p>
 
@@ -12,52 +12,125 @@
 </p>
 
 <p align="center">
-  <img src="assets/image.png" width="720" alt="dint — a Socratic AI tutor">
+  <img src="assets/demo.gif" width="720" alt="dint — a Socratic AI tutor">
 </p>
 
 ---
 
-You ask ChatGPT how bubble sort works. It dumps code. You copy it. You feel
-smart. You learn nothing. By Thursday, you can't explain it to a rubber duck.
+When you ask ChatGPT, any AI ,whoever it is about how to write a bubble sort,
+They say: "Oh, here's your code!", you edit it and think you learned it.,
+then after that you can't even remember what you did.
 
-**dint is the opposite.** You ask it how bubble sort works, and it hands you
-five numbers and says *"sort them. you can only swap neighbors. go."* You
-fumble. You trace. You figure it out. And when the code finally appears, you
-read it and think *yeah, that's the thing I just built.*
+**dint is the opposite.** You ask dint how to write a bubble sort, he will push you back,
+then refuse to give you code. He will guide you step by step, eventually you will derive a
+bubble sort yourself,remembering it for rest of your life.
 
-dint doesn't transmit knowledge. It builds it in your head, brick by brick,
-while you do the lifting.
+dint just don't give you,he let you build it yourself.
 
 ## What a session actually looks like
 
-> **You:** Teach me what a variable is. I've never written code.
+> **You:** write me a binary search, come on
 >
-> **dint:** Okay. Sit down. No code today. Not yet.
+> **dint:** No.
 >
-> You're trying to cut back on coffee, so you grab a sticky note, write
-> "cups" at the top, and every time you finish one, you update the number.
-> Morning: 0. After your second cup: 2. By 4pm you're at 4 and your hands
-> are shaking a little.
+> I could. You said "come on" like that's an argument. It's not. It's
+> impatience wearing a costume.
 >
-> That sticky note. The word "cups" never changed. The number kept changing.
-> There are two things on that note, and they're different things. One stays
-> put. One moves. Can you name those two for me?
+> Here's what I'll do instead. Five numbers. Sorted. On a table.
 >
-> **You:** the cups is the variable name and that number is a value
+> `[2, 7, 13, 21, 35]`
 >
-> **dint:** Yeah. That's it. You just described a variable without ever
-> seeing a line of code, and you used the right words for both parts.
-> So that's not luck — you actually see it.
+> I'm looking for 13. A five-year-old could look for 13 — just check
+> them one by one. 2? No. 7? No. 13? There it is. Three tries. Fine.
 >
-> *(...the lesson continues through sticky notes on a fridge, three
-> variables, mutation, `x = x + 5`, and ends with types — all before
-> the learner sees more than four lines of code...)*
+> Now. Same list. But it has a million numbers. And you're checking
+> them one by one. You're still on number 47 and I've already found
+> mine and I'm getting coffee.
 >
-> **dint:** Go rest. You earned the cold coffee. Come back when you're ready.
-
-No "Great question!" No code dump. No "Is there anything else I can help you
-with?" Just a teacher, a sticky note, and the quiet satisfaction of watching
-someone's face change when an idea lands.
+> So. You have the list. It's sorted. You know that. You're using that.
+> Where do you look first? Not "what's the algorithm." You're standing
+> in front of a million sorted numbers and you need 13. Where does
+> your finger go?
+>
+> **You:** move from start one by one and get to 13, just that simple
+>
+> **dint:** Yeah. One by one. "Just that simple."
+>
+> Okay. You're checking one by one. You're on number four hundred
+> thousand. Still going. "Is this 13? No. Is this 13? No."
+>
+> And here's me. I looked at ONE number. The one right in the middle.
+> Position 500,000. It's the number 4,999,872.
+>
+> The list is sorted. Small to big. I just checked the middle and it's
+> way bigger than 13. Do I need to look at positions 500,001 through
+> 1,000,000?
+>
+> What's true about the right half?
+>
+> **You:** no no, we just throw away the right half, and back to see
+> the left half
+>
+> **dint:** Right. You do the same thing again. Check the middle of
+> what's left. Kill half. Repeat.
+>
+> And that's the whole trick. That's literally all binary search is.
+> You just invented it.
+>
+> *(...dint then walks through the failure case — what happens when
+> you've halved down to a single number and it's not the target. The
+> learner tries "check the right half," gets corrected: there IS no
+> right half. You're standing in an empty room holding the number 12
+> and it's not the number you want...)*
+>
+> **You:** 13 just don't exist, not right and not left, so it's not
+> there, stop!
+>
+> **dint:** Yeah. There it is. "Stop." That's the whole termination
+> condition. The search space is empty. Nothing left to halve. You're
+> done. Not found.
+>
+> Look at what you just built. All of it. In like four messages.
+>
+> ✓ linear search as baseline
+> ✓ exploiting sorted order
+> ✓ midpoint check and half elimination
+> ✓ repeated halving until found
+> ✓ termination condition
+>
+> That's binary search. You invented it. Now here's the thing you just
+> built, written down. Read it. Does it match what you were thinking?
+>
+> ```python
+> def binary_search(arr, target):
+>     lo, hi = 0, len(arr) - 1
+>
+>     while lo <= hi:
+>         mid = (lo + hi) // 2
+>
+>         if arr[mid] == target:
+>             return mid
+>         elif arr[mid] < target:
+>             lo = mid + 1
+>         else:
+>             hi = mid - 1
+>
+>     return -1  # not there. stop.
+> ```
+>
+> `lo <= hi` — that's your "there's still something to look at." The
+> moment `lo > hi`, the search space is empty. Your "not right and not
+> left, stop." That's line 3.
+>
+> `hi = mid - 1` — that's your "throw away the right half."
+> `lo = mid + 1` — the other direction. Same idea.
+>
+> `return -1` — "13 just don't exist."
+>
+> You didn't need me to write that. You already had it. I just
+> translated your words into Python.
+>
+> Go edit it. Come back if the code breaks.
 
 ## Quick start
 
@@ -69,15 +142,14 @@ pip install dint
 dint
 ```
 
-Open **http://localhost:7070**. Set your API key in **Settings**. Start
-learning.
+Open **http://localhost:7070**. Set your API key in **Settings**. 
 
 Works with any OpenAI-compatible API — OpenAI, OpenRouter, Groq, Together,
 or a local [Ollama](https://ollama.com) server.
 
 ### Multi-user mode
 
-Want to host dint for a classroom, a study group, or your friends?
+Want to host dint for your friends,even a classroom?
 
 ```bash
 dint --multi-user
@@ -130,7 +202,7 @@ graph grows as you learn.
 
 Remembers you across sessions. Your goals, what you already know, how you
 like to be taught, the mistakes you keep making. Reads its notes before each
-session so it never re-teaches what you've already demonstrated.
+session so he never re-teaches what you've already demonstrated.
 
 </td>
 <td>
@@ -138,8 +210,8 @@ session so it never re-teaches what you've already demonstrated.
 **Background reflection**
 
 After every exchange, a quiet analysis pass updates dint's model of you —
-skill confidence, knowledge links, durable memories. It detects when you
-*claim* to understand but your behavior says otherwise, and corrects its
+skill confidence, knowledge links, durable memories. He detects when you
+*claim* to understand but your behavior says otherwise, and corrects he's
 own stale beliefs. You don't see any of this.
 
 </td>
@@ -147,7 +219,7 @@ own stale beliefs. You don't see any of this.
 
 **Memory consolidation**
 
-Every ~10 turns, dint reviews its entire inventory of memories, skills, and
+Every ~10 turns, dint reviews he's entire inventory of memories, skills, and
 concepts. Near-duplicates get merged. Stale entries get pruned. The model
 stays compact and honest over months of use. You can also trigger it
 manually from Settings.
@@ -159,9 +231,9 @@ manually from Settings.
 
 **Adaptive teaching**
 
-dint watches *how* you think, not just what you know. It notices you skip
-steps when tracing algorithms. It notices you learn better from analogies
-than formal definitions. It adjusts its approach per learner, per session,
+dint watches *how* you think, not just what you know. He notices you skip
+steps when tracing algorithms. He notices you learn better from analogies
+than formal definitions. He adjusts its approach per learner, per session,
 per concept.
 
 </td>
@@ -265,6 +337,8 @@ dint [--host HOST] [--port PORT] [--multi-user]
 *dint* — as in *"by dint of."* Through force of your own effort.
 
 You don't learn by being told. You learn by dint of thinking.
+
+Also, it mean "dint is not a tool" too.
 
 ---
 
